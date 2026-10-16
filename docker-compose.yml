@@ -1,0 +1,35 @@
+services:
+  # The graph engine. Knot's production tenant, the agent-memory tenant and
+  # every ephemeral shadow tenant live inside this one instance; FalkorDB
+  # isolates them by graph name.
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: knot-falkordb
+    ports:
+      - "6379:6379"
+    volumes:
+      - falkordb-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Optional web UI for poking at the graph directly. Handy when a Cypher
+  # traversal returns something surprising.
+  falkordb-browser:
+    image: falkordb/falkordb-browser:latest
+    container_name: knot-falkordb-browser
+    ports:
+      - "3000:3000"
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: 6379
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  falkordb-data:

@@ -1,0 +1,31 @@
+# Knot runtime dependencies.
+#
+# The engine is deterministic: it reasons with Cypher traversals and graph
+# algorithms, not with an LLM. There is deliberately no provider SDK here.
+
+# Graph engine + client.
+FalkorDB==1.8.0
+
+# Graph algorithms (PageRank, betweenness centrality, shortest path, cycles).
+networkx==3.7
+# networkx's pagerank and shortest_path implementations import numpy/scipy
+# lazily, so they are not pulled in by networkx itself. Without these two the
+# whole topology-algorithm layer fails at runtime with ModuleNotFoundError.
+# Tested with numpy 2.5.4 / scipy 1.18.1.
+numpy>=2.0
+scipy>=1.11
+
+# MCP server exposing the graph primitives as tools.
+fastmcp==4.1.0
+
+# REST API.
+fastapi==0.143.3
+uvicorn==0.54.0
+pydantic==2.14.1
+
+# AST parsing for PR diffs. Optional at runtime: diff_parser degrades to
+# heuristics if the grammars are unavailable, but the demo diffs are much more
+# accurate with them installed.
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+tree-sitter-javascript==0.25.0

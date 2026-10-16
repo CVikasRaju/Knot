@@ -1,0 +1,22 @@
+# Tool configuration for Knot.
+#
+# Deliberately not a build backend: the importable package is `src`, which is
+# a poor distribution name, and the project is run from a checkout rather than
+# installed from an index. This file exists to pin tool behaviour.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on exact payload shapes, which reads better as long literals.
+"tests/*" = ["E501"]

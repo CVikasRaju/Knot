@@ -1,0 +1,30 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.local
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Node (frontend workspace, if populated)
+node_modules/
+.next/
+out/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
