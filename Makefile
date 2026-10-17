@@ -3,7 +3,7 @@
 PY ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 
-.PHONY: help venv install graph seed test api mcp demo demo-future demo-incident demo-archaeology clean
+.PHONY: help venv install graph seed test api mcp ui ui-install ui-build demo demo-future demo-incident demo-archaeology clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -29,6 +29,15 @@ api: ## Start the REST API on :8000
 
 mcp: ## Start the MCP server on stdio
 	$(PY) -m src.mcp_server.server
+
+ui-install: ## Install frontend dependencies
+	cd frontend && npm install
+
+ui: ## Start the 3D command center on :5173 (needs `make api` running)
+	cd frontend && npm run dev
+
+ui-build: ## Production build of the command center
+	cd frontend && npm run build
 
 demo: demo-future demo-incident demo-archaeology ## Run all three demo scenarios
 

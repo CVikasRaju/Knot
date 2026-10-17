@@ -36,7 +36,16 @@ python -m uvicorn src.api.main:app --reload --port 8000
 python -m src.mcp_server.server
 ```
 
-`make help` lists all of these.
+Frontend (needs the API running on :8000):
+
+```bash
+cd frontend && npm install
+npm run dev                            # :5173, proxies /api -> :8000
+npx tsc --noEmit                       # typecheck; the build runs this too
+npm run build                          # production bundle
+```
+
+`make help` lists all of these (`make ui`, `make ui-install`, `make ui-build`).
 
 ## Architecture in one breath
 
@@ -121,3 +130,18 @@ while the suite is running.
 - `tree_sitter` is optional at runtime. `diff_parser` degrades to heuristics
   when the grammars are missing, so a passing test suite does not prove the AST
   path ran. Check `_TS_AVAILABLE` when debugging parse quality.
+- `frontend/src/lib/types.ts` is a hand-maintained mirror of the Python result
+  dataclasses. Nothing enforces it. A field renamed on the API side will not fail
+  the typecheck — it renders as `undefined` and throws inside the component. When
+  a shape changes, diff a real response (`python -c` on `SwarmOrchestrator`) against
+  the interface before trusting it.
+- Track values from the API are the full enum (`track_01_present`,
+  `track_02_memory`, `track_03_company_brain`), not the short names. Keying the
+  legend on `"present"` yields zero counts with no error.
+- `ProceduralPlaybook.action_steps_json` is a JSON **string**, not an array. It
+  must be parsed, and the parse guarded — a malformed value would otherwise take
+  the whole result panel down.
+- Expert records expose `ownership_score` / `signals` / `explanation`; triage
+  suspects nest the service under `service` with `score` / `reasons`. Calling
+  `.toFixed()` on a field that does not exist crashes the React tree to a blank
+  page rather than showing an error, so verify against a real payload.

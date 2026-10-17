@@ -89,6 +89,16 @@ class GraphStore(ABC):
     def fork_graph(self, source: str, target: str) -> None:
         """Clone ``source`` into ``target``, replacing any existing ``target``."""
 
+    @abstractmethod
+    def create_index(self, graph: str, label: str, prop: str) -> bool:
+        """Create an index on ``(label, prop)``.
+
+        Returns True when a new index was created, False when one already
+        existed or the backend does not support indexing. Indexing is an
+        optimisation, never a correctness requirement: callers must not depend
+        on the return value for anything but logging.
+        """
+
     # ---- writes ------------------------------------------------------------
     @abstractmethod
     def merge_nodes(self, graph: str, label: str, rows: Sequence[dict]) -> int:
@@ -293,6 +303,23 @@ class FalkorDBStore(GraphStore):
         if target in self.list_graphs():
             self._client.connection.execute_command("GRAPH.DELETE", target)
         self._client.connection.execute_command("GRAPH.COPY", source, target)
+
+    def create_index(self, graph: str, label: str, prop: str) -> bool:
+        """Create a range index, treating "already indexed" as success.
+
+        FalkorDB has no portable "list indexes" command in this version, so a
+        duplicate index is detected from the server error rather than by
+        querying first. Any other error is a real failure and propagates.
+        """
+        if not self.graph_exists(graph):
+            return False
+        try:
+            self._graph(graph).create_node_range_index(label, prop)
+        except Exception as exc:  # noqa: BLE001 - re-raised unless it is a dup
+            if "already indexed" in str(exc).lower():
+                return False
+            raise
+        return True
 
     # ---- writes ------------------------------------------------------------
     def merge_nodes(self, graph: str, label: str, rows: Sequence[dict]) -> int:
@@ -634,6 +661,10 @@ class InMemoryStore(GraphStore):
                 for edge in self._edges.get(source, [])
             ]
             self._last_cypher = f"// GRAPH.COPY {source} {target}"
+
+    def create_index(self, graph: str, label: str, prop: str) -> bool:
+        """No-op: the in-memory backend is a dict lookup and needs no index."""
+        return False
 
     # ---- writes ------------------------------------------------------------
     def merge_nodes(self, graph: str, label: str, rows: Sequence[dict]) -> int:

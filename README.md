@@ -136,6 +136,7 @@ Ask why something exists and Knot walks back through time to the decision that c
 | Agent protocol | **Model Context Protocol** via `fastmcp` |
 | API | **FastAPI** + Server-Sent Events for live agent traces |
 | Diff parsing | **tree-sitter** (Python + JavaScript grammars), with heuristic fallback |
+| Command center | **Vite + React 19 + TypeScript**, `react-force-graph-3d` for the topology view |
 | Storage model | One property graph, three tracks, bitemporal fields (`valid_from` / `valid_to`) |
 
 ---
@@ -195,6 +196,37 @@ python -m uvicorn src.api.main:app --reload --port 8000
 # MCP server (stdio) for Claude Desktop, Cursor, or any MCP client
 python -m src.mcp_server.server
 ```
+
+### 7. Launch the 3D command center
+
+With the API from step 6 still running:
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
+```
+
+The command center loads the seeded graph, then streams the agent trace as you run
+each scenario. The graph dims to only the nodes an agent actually inspected, so the
+multi-hop path is visible rather than described. Clicking any node, trace pill, or
+certificate entry opens an inspector with its properties and neighbours.
+
+| What you see | Where it comes from |
+| :--- | :--- |
+| Live 3D topology, coloured by track | `GET /api/graph` |
+| Agent trace appearing as the run progresses | `POST /api/stream/*` (SSE) |
+| Traversal highlight on the graph | `inspected_node_ids` on each SSE event |
+| Verdict, blast radius, ADR violations | `simulation` in the result payload |
+| Proof certificate, with the Cypher that produced it | `simulation.certificates` |
+
+The dev server proxies `/api` to `:8000`, so no CORS setup is needed. For a
+production build, `npm run build` writes `frontend/dist`; point any static server at
+it and reverse-proxy `/api` to the API.
+
+> The scenarios are read-only by default. Actions such as `block_ci_merge` and
+> `create_revert_pr` are recorded with `status: "DRY_RUN"` unless you explicitly
+> enable live execution, so clicking through the demo cannot mutate a real repo.
 
 ---
 
@@ -256,6 +288,11 @@ src/
   api/main.py            REST + SSE endpoints
   seed.py, seed_data.py  the demo enterprise
   scenario.py            CLI scenario runner
+frontend/                3D command center (Vite + React + TypeScript)
+  src/App.tsx             layout: scenario rail, graph stage, trace/result panel
+  src/lib/api.ts          REST + SSE client, typed against the API
+  src/lib/types.ts        response shapes, mirrored from the Python dataclasses
+  src/components/         GraphStage, AgentTimeline, ResultPanel, NodeInspector
 tests/                   contract + scenario suites (real FalkorDB)
 scripts/                 thin CLI shims
 ```

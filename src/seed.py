@@ -12,8 +12,36 @@ import sys
 from . import seed_data as sd
 from .config import Settings, get_settings
 from .graph import open_store
+from .graph.ontology import NODE_BY_LABEL
 from .graph.store import GraphStore
 from .memory.memory import MemoryStore
+
+#: Labels indexed in the production tenant. These are the entities the swarm
+#: looks up by id during a traversal or an investigation.
+PROD_INDEXED_LABELS: tuple[str, ...] = (
+    "Service",
+    "ASTModule",
+    "APISchema",
+    "SchemaField",
+    "InfraResource",
+    "Alert",
+    "Person",
+    "Team",
+    "PullRequest",
+    "Commit",
+    "ADR",
+    "DiscussionThread",
+    "Ticket",
+)
+
+#: Labels indexed in the memory tenant. Memory recall matches on these.
+MEMORY_INDEXED_LABELS: tuple[str, ...] = (
+    "EpisodicIncident",
+    "ProceduralPlaybook",
+    "SemanticRule",
+    "AgentSession",
+    "ReasoningStep",
+)
 
 
 def seed_production(store: GraphStore, graph: str) -> dict[str, int]:
@@ -295,6 +323,28 @@ def seed_memory(store: GraphStore, memory_graph: str, prod_graph: str) -> dict[s
     return counts
 
 
+def ensure_indexes(store: GraphStore, settings: Settings) -> dict[str, int]:
+    """Index the lookup keys the swarm actually filters on.
+
+    Every traversal, node fetch and memory recall matches on a node's key
+    property (``Service.id``, ``Alert.id``, ...). Without an index FalkorDB
+    scans the label, which is invisible at demo scale but dominates once the
+    graph is real. Safe to call repeatedly: a duplicate index is not an error.
+    """
+    created = 0
+    for graph, labels in (
+        (settings.prod_graph, PROD_INDEXED_LABELS),
+        (settings.memory_graph, MEMORY_INDEXED_LABELS),
+    ):
+        for label in labels:
+            spec = NODE_BY_LABEL.get(label)
+            if spec is None:
+                continue
+            if store.create_index(graph, label, spec.key):
+                created += 1
+    return {"indexes_created": created}
+
+
 def seed_all(
     store: GraphStore, settings: Settings, reset: bool = False
 ) -> dict[str, dict[str, int]]:
@@ -303,7 +353,10 @@ def seed_all(
         store.drop_graph(settings.memory_graph)
     production = seed_production(store, settings.prod_graph)
     memory = seed_memory(store, settings.memory_graph, settings.prod_graph)
-    return {"production": production, "memory": memory}
+    # Indexes are created after the data so the seed does not pay for
+    # maintaining them on every insert.
+    indexes = ensure_indexes(store, settings)
+    return {"production": production, "memory": memory, **indexes}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -325,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     result = seed_all(store, settings, reset=args.reset)
 
     for tenant, counts in result.items():
+        if not isinstance(counts, dict):
+            print(f"[seed] {tenant}: {counts}")
+            continue
         print(f"[seed] {tenant}:")
         for label, count in sorted(counts.items()):
             print(f"         {label:<20} {count}")
