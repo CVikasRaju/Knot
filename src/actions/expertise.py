@@ -1,7 +1,7 @@
 """Dynamic expertise and ownership scoring (Track 03).
 
 A static CODEOWNERS file tells you who *was* responsible when it was written.
-ChronosGraph computes who actually knows the system right now, from the graph:
+Knot computes who actually knows the system right now, from the graph:
 commit recency, review activity, architectural authorship and on-call state.
 
 The scoring is a transparent weighted sum with an explicit recency decay, not a

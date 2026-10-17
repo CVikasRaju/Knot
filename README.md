@@ -1,13 +1,53 @@
 # ⏳ Knot: Temporal-Predictive Engineering Graph
 
 > **Built for GraphHacks (WeMakeDevs) | Powered by FalkorDB & Model Context Protocol (MCP)**
-> **Primary Entry:** Track 01 (Agents That Act on Connected Data)
-> **Integrated Capabilities:** Track 02 (Episodic / Procedural Agent Memory) + Track 03 (Unified Company Brain)
+
+## 🏁 Track entered
+
+**Track 01 — Agents That Act on Connected Data.**
+
+Knot is entered in Track 01 alone. It also uses the capabilities of Track 02
+(episodic and procedural agent memory) and Track 03 (a unified company brain),
+because the three are not separable here: the memory that makes triage fast is
+stored in the same graph as the company brain that answers *why*, and both are
+read through the same traversals. Those two tracks are described below as
+supporting capability, not as separate entries.
 
 [![FalkorDB](https://img.shields.io/badge/Graph_Engine-FalkorDB-FF5722?style=for-the-badge)](https://www.falkordb.com/)
 [![MCP](https://img.shields.io/badge/Protocol-Model_Context_Protocol-00ADD8?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI_%2B_SSE-009688?style=for-the-badge)](https://fastapi.tiangolo.com/)
 [![Python](https://img.shields.io/badge/Core-Python_3.11_%2B_networkx-3776AB?style=for-the-badge)](https://www.python.org/)
+
+---
+
+## ⛓️ FalkorDB is load-bearing
+
+This matters for judging, so it is stated plainly: **remove FalkorDB and Knot
+does not work.** The graph is not a visualisation over ordinary storage, and
+there is no non-graph path through the product.
+
+- **The core feature is a graph operation.** Counterfactual simulation is
+  `GRAPH.COPY` of the production tenant into a throwaway one, a mutation injected
+  into the fork, then a traversal over the fork. There is no relational or
+  document equivalent that keeps this cheap and non-destructive.
+- **Multi-tenant forking is native.** `prod_org_brain`, `agent_memory` and
+  `shadow_sim_<pr>-<hash>` are separate graphs *by name in one instance*.
+  Simulation isolation is a property of the engine, not something the app
+  emulates.
+- **Every conclusion is a traversal or an algorithm.** Blast radius is a bounded
+  BFS over the dependency digraph; triage is a typed multi-hop walk; provenance
+  is a direction-changing hop chain; criticality is PageRank and betweenness.
+  Nothing is derived from a flat table scan.
+- **Proof is a graph path.** `execute_verified_remediation` refuses to act
+  without a `proof_path_ids` array produced by a prior traversal, and the
+  certificate embeds the Cypher that produced it. The evidence *is* the path.
+
+Because of this, a missing FalkorDB is a **hard failure by default**. An earlier
+version of `open_store()` silently degraded to an empty in-process graph, which
+would have let Knot appear to run — answering every query with nothing — while
+the engine was absent. That is exactly the "graph as decoration" failure mode, so
+the fallback is now opt-in and documented in
+[Configuration](#️-configuration).
 
 ---
 
@@ -147,6 +187,7 @@ Ask why something exists and Knot walks back through time to the decision that c
 
 - Docker & Docker Compose (for FalkorDB)
 - Python 3.11+
+- Node.js 20+ (only for the 3D command center in step 7)
 
 ### 2. Start FalkorDB
 
@@ -171,7 +212,7 @@ cp .env.example .env             # every value already has a working default
 ### 4. Seed the enterprise graph
 
 ```bash
-python scripts/seed_chronos_graph.py --reset
+python scripts/seed_knot.py --reset
 # [seed] prod_org_brain: 87 nodes / 134 edges
 # [seed] agent_memory:   11 nodes / 7 edges
 ```
@@ -230,6 +271,231 @@ it and reverse-proxy `/api` to the API.
 
 ---
 
+## 🗄️ Graph Data Model
+
+Everything Knot knows lives in **one FalkorDB instance**, split across three
+tenants. Tenants are separate graphs *by name* inside the same instance — that is
+the mechanism the whole product rests on, because it makes forking production for
+a simulation a `GRAPH.COPY` instead of a second database.
+
+| Tenant | Created by | Lifetime | Contents |
+| :--- | :--- | :--- | :--- |
+| `prod_org_brain` | `make seed` | permanent | 87 nodes / 134 edges — code, infra, people, decisions, telemetry |
+| `agent_memory` | `make seed` | permanent | 11 nodes / 7 edges — episodic incidents and procedural playbooks, grown by every run |
+| `shadow_sim_<pr_id>-<hash>` | a simulation | dropped after the run | an ephemeral fork of production with one PR's mutation injected |
+
+The ontology is defined once in `src/graph/ontology.py` and enforced at seed time
+by `validate_schema()`, which fails the seed if a node label or edge type is used
+that is not declared here. The tables below are generated from that file.
+
+### Node labels (18)
+
+| Track | Label | Key | Properties |
+| :--- | :--- | :--- | :--- |
+| **01 — Present** | `Service` | `id` | `name`, `tier`, `sla_ms`, `criticality_score`, `status`, `language`, `repo` |
+| | `ASTModule` | `id` | `file_path`, `language`, `ast_hash`, `complexity`, `loc` |
+| | `APISchema` | `id` | `endpoint`, `version`, `payload_hash`, `fields` |
+| | `SchemaField` | `id` | `name`, `type`, `nullable`, `breaking`, `owner_module` |
+| | `InfraResource` | `id` | `kind`, `region`, `config_json` |
+| | `Alert` | `id` | `severity`, `metric`, `value`, `threshold`, `timestamp`, `status`, `summary` |
+| **02 — Memory** | `EpisodicIncident` | `id` | `summary`, `occurred_at`, `root_cause_hash`, `mttr_seconds`, `severity` |
+| | `ProceduralPlaybook` | `id` | `name`, `trigger_signature`, `action_steps_json`, `success_rate`, `uses` |
+| | `SemanticRule` | `id` | `invariant_statement`, `enforcement_level`, `domain` |
+| | `AgentSession` | `id` | `active_agent`, `status`, `updated_at` |
+| | `ReasoningStep` | `id` | `step_index`, `agent_name`, `tool_called`, `cypher_executed`, `observation` |
+| **03 — Company brain** | `Person` | `id` | `handle`, `name`, `role`, `timezone`, `on_call` |
+| | `Team` | `id` | `name`, `slack_channel` |
+| | `PullRequest` | `id` | `number`, `title`, `state`, `diff_summary`, `created_at`, `repo` |
+| | `Commit` | `id` | `sha`, `message`, `timestamp`, `additions`, `deletions` |
+| | `ADR` | `id` | `code`, `title`, `status`, `rationale`, `created_at`, `constraint_json` |
+| | `DiscussionThread` | `id` | `platform`, `channel`, `summary`, `source_url`, `timestamp` |
+| | `Ticket` | `id` | `key`, `title`, `priority`, `status` |
+
+### Edge types (26)
+
+`traversable` marks the edges a multi-hop walk may follow; the rest are
+metadata hops that would otherwise let a traversal escape the causal graph.
+
+| Track | Type | Source → Target | Traversable |
+| :--- | :--- | :--- | :---: |
+| **01** | `CALLS` | `Service` → `Service` | ✅ |
+| | `EXPOSES` | `Service` → `APISchema` | ✅ |
+| | `HAS_FIELD` | `APISchema` → `SchemaField` | ✅ |
+| | `IMPLEMENTED_BY` | `Service` → `ASTModule` | ✅ |
+| | `IMPORTS` | `ASTModule` → `ASTModule` | ✅ |
+| | `DEPLOYED_ON` | `Service` → `InfraResource` | ✅ |
+| | `TRIGGERED_ON` | `Alert` → `Service` | ✅ |
+| | `MODIFIES` | `PullRequest` → `ASTModule` | ✅ |
+| **02** | `AFFECTED` | `EpisodicIncident` → `Service` | ✅ |
+| | `RESOLVED_BY` | `EpisodicIncident` → `ProceduralPlaybook` | ✅ |
+| | `PRODUCED_STEP` | `AgentSession` → `ReasoningStep` | ✅ |
+| | `INSPECTED_NODE` | `ReasoningStep` → `*` | — |
+| | `HANDED_OFF_TO` | `ReasoningStep` → `ReasoningStep` | ✅ |
+| **03** | `MEMBER_OF` | `Person` → `Team` | — |
+| | `OWNS` | `Team` → `Service` | — |
+| | `AUTHORED` | `Person` → `PullRequest` \| `ADR` | — |
+| | `REVIEWED` | `Person` → `PullRequest` | — |
+| | `COMMITTED` | `Person` → `Commit` | — |
+| | `INCLUDED_IN` | `Commit` → `PullRequest` | — |
+| | `IMPLEMENTS` | `PullRequest` → `Ticket` | — |
+| | `DISCUSSED_IN` | `Ticket` → `DiscussionThread` | — |
+| | `RESULTED_IN_DECISION` | `DiscussionThread` → `ADR` | — |
+| | `GOVERNS` | `ADR` → `Service` | — |
+| | `CONSTRAINS` | `ADR` → `APISchema` | — |
+| | `VIOLATES` | `PullRequest` → `ADR` | — |
+
+### Why this shape
+
+The topology in `src/seed_data.py` is chosen so the three scenarios are
+**emergent rather than hard-coded**:
+
+- `SVC-AUTH` sits behind `SVC-ORDER` and `SVC-RISK`, which feed `SVC-PAY`,
+  `SVC-BILL` and `SVC-NOTIF`. A schema change at the auth boundary therefore
+  reaches two Tier-1 services **by real traversal**, not by a lookup table.
+- `SVC-BILL → SVC-ORDER → SVC-PAY → SVC-BILL` is a genuine reconciliation
+  cycle, so cycle detection has something honest to find.
+- `ADR-019` carries a machine-checkable constraint over `MOD-AUTH-TOKEN` — the
+  exact module `PR-812` touches — so the shadow simulation can cite the policy it
+  breaks rather than guessing.
+
+### Indexes
+
+`seed.ensure_indexes()` creates 18 range indexes on `(label, id)` for every node
+label. Without them every node-id lookup is a full label scan. Creation is
+idempotent, and indexing is treated as an optimisation, never a correctness
+requirement.
+
+---
+
+## 🧮 Cypher Queries and Graph Algorithms
+
+These are the queries and algorithms the product actually depends on. The Cypher
+below was captured from a live run by instrumenting the store's `_run` method,
+so it is what FalkorDB receives — not an idealised version.
+
+### 1. Bounded multi-hop traversal — `graph_multi_hop_investigate`
+
+The workhorse. Every investigative tool is a bounded walk over a **typed**
+relationship alternation, which is why traversal cannot escape into unrelated
+metadata edges.
+
+```cypher
+// Built in src/graph/store.py::FalkorDBStore.traverse
+// Direction is out | in | both; the pattern is assembled per direction because
+// FalkorDB rejects some typed alternations mixed with an untyped -[r]- form.
+MATCH (a {id: $start_id})
+MATCH p = (a)-[:CALLS|IMPLEMENTED_BY|MODIFIES*1..6]->(b)
+RETURN p LIMIT $limit
+```
+
+Concretely, the PR-812 simulation issues:
+
+```cypher
+MATCH (a {id: $start_id})
+MATCH p = (a)-[:MODIFIES|IMPLEMENTED_BY|CALLS*1..5]->(b)
+RETURN p LIMIT $limit
+```
+
+The hop cap is `KNOT_MAX_HOPS` (default 6). Multi-hop explosion is the main
+failure mode of graph agents, so every traversal is bounded.
+
+### 2. Reverse blast-radius propagation — the counterfactual core
+
+Implemented in `src/graph/algorithms.py::blast_radius`. Propagation runs
+**against** the call direction: if `A` calls `B` and `B` breaks, `A` is impacted.
+This is a bounded breadth-first sweep over the reversed dependency digraph, which
+keeps the shortest depth per node:
+
+```
+reversed = reverse(call_graph)
+BFS from origin, max_hops, first-wins on depth
+  -> impacted = {node: hop_distance}
+  -> tier1_impacted, hop_distribution, impact_paths
+```
+
+Run it on the **shadow** graph and the hop-distance distribution *is* the
+predicted blast radius before the merge. The blast radius reported for `PR-812`
+(4 impacted services, 2 of them Tier-1, at a maximum of 2 hops) is the output of
+this function, not a constant.
+
+### 3. Counterfactual fork — `GRAPH.COPY`
+
+The shadow-graph primitive, and the reason FalkorDB is load-bearing rather than a
+drawing surface:
+
+```python
+# src/graph/store.py::FalkorDBStore.fork_graph
+if target in self.list_graphs():
+    self._client.connection.execute_command("GRAPH.DELETE", target)
+self._client.connection.execute_command("GRAPH.COPY", source, target)
+```
+
+`GRAPH.DELETE` removes the graph key entirely; `MATCH (n) DETACH DELETE n` would
+leave an empty graph still listed by `GRAPH.LIST` and break teardown assertions.
+After evaluation the tenant is dropped, so simulations never accumulate.
+
+### 4. Provenance walk — `trace_company_decision_provenance`
+
+Walks backwards from code to the humans and documents that shaped it:
+
+```
+entity (Service)
+  -[:IMPLEMENTED_BY]-> (ASTModule)
+  <-[:MODIFIES]-        (PullRequest)
+  <-[:AUTHORED]-        (Person)
+  -[:IMPLEMENTS]->      (Ticket)
+  -[:DISCUSSED_IN]->    (DiscussionThread)
+  -[:RESULTED_IN_DECISION]-> (ADR)
+```
+
+This is composed as successive hops rather than one `MATCH p = ...` because the
+walk changes direction partway (forward through `IMPLEMENTED_BY`, backward
+through `MODIFIES`). The same decision is frequently reachable by more than one
+route — an ADR can both govern a service directly and be produced by the
+discussion behind a PR — so identical `(event, node)` pairs are collapsed; a
+timeline that lists one decision twice reads as two separate decisions.
+
+### 5. Cycle detection — `detect_cycles`
+
+Finds dependency cycles, the classic cause of deploy-time deadlock. It
+legitimately finds `SVC-BILL → SVC-ORDER → SVC-PAY → SVC-BILL` in the seeded
+topology.
+
+### Graph algorithms
+
+`run_graph_topology_algorithm` exposes these as MCP tools, implemented on
+`networkx` over a snapshot of the tenant (`src/graph/algorithms.py`):
+
+| Algorithm | Question it answers | Where it is used |
+| :--- | :--- | :--- |
+| `pagerank_criticality` | If this node misbehaves, how much traffic-weighted blame reaches it? | Finding critical-but-undocumented modules nobody owns |
+| `betweenness_centrality` | Which nodes sit on the most shortest paths? | Single points of failure during triage |
+| `shortest_dependency_path` | What is the shortest causal chain between two entities? | Explaining *how* an alert reached a service |
+| `blast_radius` | Everything downstream a change can reach | The PR-812 prediction |
+| `detect_cycles` | Where are the dependency loops? | Pre-merge topology stress test |
+
+Each returns an `AlgorithmResult` carrying `scores`, the `path`, a `details`
+breakdown, and a natural-language `justification` — so a finding can always be
+traced back to the traversal that produced it.
+
+### Write path
+
+Writes are batched `UNWIND $rows AS row MERGE ...` statements, one per edge type,
+grouped by target label:
+
+```cypher
+UNWIND $rows AS row
+MATCH (a:ReasoningStep {id: row.src})
+MATCH (b:Service {id: row.dst})
+MERGE (a)-[e:INSPECTED_NODE]->(b) SET e += row.props
+RETURN count(e) AS merged
+```
+
+Edges are grouped by target label because `MERGE` needs a concrete label to bind
+the destination node.
+
+---
+
 ## 🧪 Tests
 
 The suite runs against a **real FalkorDB instance**, not a mock — the bugs worth catching in this project all lived in the boundary with the engine (path edge indices, `GRAPH.DELETE` semantics, duplicate edge-type registries), and a fake store would have hidden every one of them. Start FalkorDB first, then:
@@ -242,7 +508,7 @@ Tests use throwaway per-test tenant names (`t_prod_*`, `t_mem_*`, `t_shadow_*`),
 
 > Run one suite at a time against a given FalkorDB instance. The leak check diffs the instance-wide graph list, so a scenario or API process forking a shadow graph mid-run will make it fail on a false positive.
 
-Set `CHRONOS_MEMORY_BACKEND=1` to run against the in-process backend instead; the suite then skips rather than failing, since the contract tests are only meaningful against the real engine.
+Set `KNOT_MEMORY_BACKEND=1` to run against the in-process backend instead; the suite then skips rather than failing, since the contract tests are only meaningful against the real engine.
 
 ---
 
@@ -306,15 +572,87 @@ All tunables are environment-driven (`src/config.py`); see `.env.example` for th
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
 | `FALKORDB_HOST` / `FALKORDB_PORT` | `127.0.0.1` / `6379` | Engine endpoint |
-| `CHRONOS_MAX_HOPS` | `6` | Traversal depth cap — multi-hop explosion is the main failure mode |
-| `CHRONOS_CONFIDENCE_THRESHOLD` | `0.85` | Bar a proof certificate must clear before an action executes |
-| `CHRONOS_ACTIONS_DRY_RUN` | `1` | `1` plans and reports actions without executing them |
-| `CHRONOS_MEMORY_BACKEND` | `0` | `1` forces the in-process backend (tests) |
+| `KNOT_PROD_GRAPH` / `KNOT_MEMORY_GRAPH` | `prod_org_brain` / `agent_memory` | Tenant graph names |
+| `KNOT_MAX_HOPS` | `6` | Traversal depth cap — multi-hop explosion is the main failure mode |
+| `KNOT_CONFIDENCE_THRESHOLD` | `0.85` | Bar a proof certificate must clear before an action executes |
+| `KNOT_ACTIONS_DRY_RUN` | `1` | `1` plans and reports actions without executing them |
+| `KNOT_MEMORY_BACKEND` | `0` | `1` forces the in-process backend (tests) |
+| `KNOT_ALLOW_MEMORY_FALLBACK` | `0` | `1` permits an empty in-process graph when FalkorDB is absent (tests only) |
 
 Actions default to **dry run**: the executor reports exactly what it would do and with which proof, without touching anything real.
+
+> The `CHRONOS_`-prefixed names from the project's earlier working title still
+> resolve, so an existing `.env` keeps working; `KNOT_` wins when both are set.
+
+---
+
+## 📊 Data provenance
+
+**All graph data is synthetic.** The demo enterprise in `src/seed_data.py` is
+authored for this project: 12 invented services (`SVC-AUTH`, `SVC-PAY`,
+`SVC-STRIPE` …), 6 invented people, 4 teams, and fictional ADRs, tickets and
+Slack threads. Nothing is scraped, and no real organisation's code, people or
+incidents are represented.
+
+- No private, login-protected, paywalled or personal data is loaded.
+- The seeder makes **no network calls** — there is no ingestion path that could
+  pull in external data.
+- Slack URLs in the seed data are inert placeholders under `acme.slack.com`;
+  they are display strings for the provenance timeline, not live links.
+- `src/seed_data.py` is the single source of truth, so the seeder, the tests and
+  this README all describe the same company.
+
+Knot is therefore safe to run against the public repo: seeding cannot reach out
+to anything.
+
+---
+
+## 🎬 Demo video
+
+<!-- Replace with your recorded walkthrough before submitting. -->
+**Link:** _to be added_ — a single take showing the three scenarios below in
+order, run against a live FalkorDB, with the 3D command center open.
+
+What the recording shows:
+
+1. **`future_sim` (Track 01).** Simulate `PR-812`, which changes the token
+   timeout in `MOD-AUTH-TOKEN`. The simulator forks production into
+   `shadow_sim_812-*`, injects the mutation, and reports a blast radius of 4
+   impacted services — 2 of them Tier-1 — plus the `ADR-019` and `ADR-014`
+   constraints the change violates. The graph dims to just the inspected nodes
+   as the trace streams.
+2. **`live_incident` (Track 01 + 02).** Trigger `ALT-904`. Triage runs
+   betweenness centrality and a multi-hop walk to isolate the cause, recalls
+   playbook `PB-09` from episodic memory, and the Commander executes a
+   proof-gated revert.
+3. **`archaeology` (Track 03).** Ask why `PaymentService` bypasses Redis on
+   retry. The provenance walk returns `ADR-003`, the Slack thread behind it, and
+   a ranked list of who actually knows the system.
+
+Reproduce it locally with `make demo`, or the three commands in
+[Quick Start step 5](#5-run-a-scenario).
+
+---
+
+## ✅ Submission checklist
+
+| Requirement | Where it is satisfied |
+| :--- | :--- |
+| Public source-code repository | `github.com/CVikasRaju/Knot` (MIT) |
+| README with setup instructions | [Quick Start](#-quick-start) — FalkorDB → seed → API/MCP → UI |
+| README with the graph data model | [Graph Data Model](#️-graph-data-model) — 18 node labels, 26 edge types, 3 tenants |
+| Cypher queries the product depends on | [Cypher Queries and Graph Algorithms](#-cypher-queries-and-graph-algorithms) — captured from live runs |
+| Graph algorithms the product depends on | Same section — PageRank, betweenness, shortest path, blast radius, cycles |
+| Demo video | [Demo video](#-demo-video) |
+| Live deployment, or complete local setup | [Quick Start](#-quick-start) — fully local, Docker Compose for the engine |
+| Track entered | [Track entered](#-track-entered) — **Track 01** |
+| FalkorDB is the primary graph database and load-bearing | [FalkorDB is load-bearing](#️-falkordb-is-load-bearing) |
+| Data is public / synthetic / own | [Data provenance](#-data-provenance) — fully synthetic, no network ingestion |
 
 ---
 
 ## 📜 License
 
 MIT License — built for **GraphHacks**.
+
+

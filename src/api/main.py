@@ -48,7 +48,7 @@ memory = MemoryStore(store, settings.memory_graph, settings.prod_graph)
 orchestrator = SwarmOrchestrator(settings, store)
 
 app = FastAPI(
-    title="ChronosGraph Swarm Coordinator",
+    title="Knot Swarm Coordinator",
     version="1.0.0",
     description=(
         "Temporal-predictive autonomous engineering swarm over FalkorDB. "

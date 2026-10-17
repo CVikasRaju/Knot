@@ -1,4 +1,4 @@
-"""ChronosGraph MCP server.
+"""Knot MCP server.
 
 Every graph capability the swarm uses is registered here as a Model Context
 Protocol tool, so an external MCP client (Claude Desktop, Cursor, another
@@ -45,9 +45,9 @@ from ..memory.memory import MemoryStore
 from ..memory.proof import ProofCertificate
 
 mcp: FastMCP = FastMCP(
-    name="chronosgraph",
+    name="knot",
     instructions=(
-        "ChronosGraph exposes a temporal enterprise knowledge graph on FalkorDB. "
+        "Knot exposes a temporal enterprise knowledge graph on FalkorDB. "
         "Use graph_multi_hop_investigate to trace causality, "
         "run_graph_topology_algorithm to find single points of failure, "
         "fork_and_simulate_shadow_graph to predict the blast radius of an "
@@ -516,7 +516,7 @@ def execute_verified_remediation(
 
 @mcp.tool
 def describe_graph_schema() -> str:
-    """Return the ChronosGraph ontology: node labels, edges and track mapping.
+    """Return the Knot ontology: node labels, edges and track mapping.
 
     Useful for an MCP client that needs to know which relationship types exist
     before issuing a filtered traversal.
@@ -579,7 +579,7 @@ def build_server() -> FastMCP:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="ChronosGraph MCP server")
+    parser = argparse.ArgumentParser(description="Knot MCP server")
     parser.add_argument(
         "--transport",
         default="stdio",
@@ -593,7 +593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = _settings()
     store = _store()
     print(
-        f"[chronosgraph-mcp] backend={store.name} "
+        f"[knot-mcp] backend={store.name} "
         f"prod={settings.prod_graph} memory={settings.memory_graph}",
         file=sys.stderr,
     )

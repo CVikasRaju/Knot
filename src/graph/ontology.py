@@ -1,4 +1,4 @@
-"""The unified ChronosGraph ontology.
+"""The unified Knot ontology.
 
 One property graph carries all three hackathon tracks:
 

@@ -360,7 +360,7 @@ def seed_all(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Seed the ChronosGraph tenants.")
+    parser = argparse.ArgumentParser(description="Seed the Knot tenants.")
     parser.add_argument("--reset", action="store_true", help="drop tenants first")
     parser.add_argument(
         "--memory-backend",

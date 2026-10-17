@@ -1,7 +1,7 @@
-"""Counterfactual shadow-graph simulation - ChronosGraph's "pre-crime" engine.
+"""Counterfactual shadow-graph simulation - Knot's "pre-crime" engine.
 
 The idea in one paragraph: a pull request is a *hypothesis about the future*.
-Instead of reviewing the diff as text, ChronosGraph forks the production
+Instead of reviewing the diff as text, Knot forks the production
 knowledge graph into an ephemeral FalkorDB tenant (``shadow_sim_<id>``), injects
 the PR's structural delta into the fork, and then asks graph questions about the
 forked world. Because the fork is a real graph, every prediction is a traversal

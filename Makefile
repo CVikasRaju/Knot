@@ -19,7 +19,7 @@ graph: ## Start FalkorDB (+ browser) via docker compose
 	docker compose up -d falkordb
 
 seed: ## Seed the demo enterprise into FalkorDB
-	$(PY) scripts/seed_chronos_graph.py --reset
+	$(PY) scripts/seed_knot.py --reset
 
 test: ## Run the test suite against a live FalkorDB
 	$(PY) -m pytest

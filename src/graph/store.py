@@ -924,8 +924,23 @@ class InMemoryStore(GraphStore):
         )
 
 
+class GraphUnavailable(RuntimeError):
+    """Raised when the FalkorDB engine cannot be reached.
+
+    Knot's product behaviour *is* graph traversal, so silently degrading to the
+    in-process backend would produce a system that looks like it works while
+    answering every query from an empty graph. The fallback is therefore opt-in:
+    callers must ask for it (``allow_memory_fallback``) or get this error.
+    """
+
+
 def open_store(settings) -> GraphStore:
-    """Return a live store, degrading to the in-memory backend when needed."""
+    """Open the FalkorDB store, or the in-process one when explicitly allowed.
+
+    Raises :class:`GraphUnavailable` when FalkorDB cannot be reached and the
+    fallback was not explicitly requested.
+    """
+    reason = ""
     if not settings.force_memory_backend:
         try:
             store = FalkorDBStore(
@@ -936,6 +951,17 @@ def open_store(settings) -> GraphStore:
             )
             if store.ping():
                 return store
-        except Exception:
-            pass
-    return InMemoryStore()
+            reason = "ping returned false"
+        except Exception as exc:  # noqa: BLE001 - re-raised as GraphUnavailable
+            reason = f"{type(exc).__name__}: {exc}"
+
+    if settings.allow_memory_fallback:
+        return InMemoryStore()
+
+    raise GraphUnavailable(
+        "FalkorDB is not reachable at "
+        f"{settings.falkor_host}:{settings.falkor_port} ({reason or 'forced'}). "
+        "Knot runs on FalkorDB - start it with `docker compose up -d falkordb`, "
+        "or set KNOT_ALLOW_MEMORY_FALLBACK=1 to run against the in-process "
+        "backend with an empty graph (tests only)."
+    )

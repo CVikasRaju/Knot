@@ -285,7 +285,7 @@ MODES = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run a ChronosGraph demo scenario.",
+        description="Run a Knot demo scenario.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -318,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     orchestrator = SwarmOrchestrator(settings, store)
 
     if not args.quiet and not args.json:
-        print(_c(f"ChronosGraph | backend={store.name} "
+        print(_c(f"Knot | backend={store.name} "
                  f"prod={settings.prod_graph} memory={settings.memory_graph}", DIM))
 
     result = MODES[args.mode](args, orchestrator, store)

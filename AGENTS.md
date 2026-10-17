@@ -5,9 +5,8 @@ making changes; it records the conventions and the non-obvious traps.
 
 ## What this project is
 
-Knot (internally also called ChronosGraph) is an engineering-intelligence
-engine backed by **FalkorDB**. It answers three questions over one property
-graph:
+Knot is an engineering-intelligence engine backed by **FalkorDB**. It answers
+three questions over one property graph:
 
 - **Past** — why does this code exist? (decision provenance: code → commit → PR → ticket → Slack → ADR)
 - **Present** — why is production broken right now? (multi-hop triage + episodic memory recall)
@@ -22,7 +21,7 @@ from a checkout.
 docker compose up -d falkordb          # REQUIRED before tests; they use the real engine
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-python scripts/seed_chronos_graph.py --reset
+python scripts/seed_knot.py --reset
 python -m pytest                       # 81 tests, ~13s
 ```
 
@@ -88,12 +87,24 @@ alone. `InMemoryStore` stores nodes as a dict keyed by id (not a list) — code
 that iterates `_nodes` must use `.items()`/`.values()`.
 
 **Traversals are always bounded.** Multi-hop explosion is the main failure mode
-of graph agents. `CHRONOS_MAX_HOPS` and `CHRONOS_TRAVERSAL_BUDGET` exist so a
+of graph agents. `KNOT_MAX_HOPS` and `KNOT_TRAVERSAL_BUDGET` exist so a
 badly-connected graph cannot hang the swarm.
 
-**Actions default to dry run.** `CHRONOS_ACTIONS_DRY_RUN=1` means the executor
+**Actions default to dry run.** `KNOT_ACTIONS_DRY_RUN=1` means the executor
 reports what it would do without doing it. Mutating paths must stay behind
 `execute_verified_remediation`, which refuses to run without `proof_path_ids`.
+
+**FalkorDB is required, not optional.** `open_store()` raises
+`GraphUnavailable` when the engine is unreachable; it only falls back to the
+empty `InMemoryStore` when `allow_memory_fallback` is set, which the test
+fixture does explicitly. Do not restore a silent fallback — the product's whole
+behaviour is graph traversal, so degrading to an empty graph would make it look
+like it works while answering every query with nothing.
+
+**The product name is Knot.** The earlier working title ChronosGraph survives
+only as the legacy `CHRONOS_*` env prefix (see `_env_str` in `src/config.py`),
+which is kept for backwards compatibility. New code, docs and identifiers use
+`KNOT_*`.
 
 ## Testing notes
 

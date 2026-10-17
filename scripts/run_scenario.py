@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convenience entry point: run a ChronosGraph demo scenario.
+"""Convenience entry point: run a Knot demo scenario.
 
 Kept as a thin shim so ``python scripts/run_scenario.py`` works exactly as the
 README documents, without the reader needing to know about ``python -m``.

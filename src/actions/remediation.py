@@ -7,7 +7,7 @@ is the difference between an agent that acts on connected data and an agent that
 acts on vibes.
 
 External effects (GitHub, PagerDuty) go through :class:`GitHubActionClient`,
-which is dry-run by default. Set ``CHRONOS_ACTIONS_DRY_RUN=0`` plus a token to
+which is dry-run by default. Set ``KNOT_ACTIONS_DRY_RUN=0`` plus a token to
 perform real API calls.
 """
 
@@ -159,7 +159,7 @@ class RemediationExecutor:
         if not proof_path_ids:
             raise ActionRefused(
                 f"{action_type} refused: no proof_path_ids supplied. "
-                "ChronosGraph never mutates production without a graph proof."
+                "Knot never mutates production without a graph proof."
             )
         if not proof.is_actionable:
             raise ActionRefused(
@@ -182,7 +182,7 @@ class RemediationExecutor:
         self, proof: ProofCertificate, remediation_note: str
     ) -> str:
         lines = [
-            "## ChronosGraph verified remediation",
+            "## Knot verified remediation",
             "",
             f"**Claim:** {proof.claim}",
             f"**Verdict:** {proof.verdict} (confidence {proof.confidence:.2f})",
@@ -212,7 +212,7 @@ class RemediationExecutor:
             remediation_note,
             "",
             "---",
-            "_This change was proposed by an AI agent (ChronosGraph) on behalf of the "
+            "_This change was proposed by an AI agent (Knot) on behalf of the "
             "repository owner, from graph evidence. Review before merging._",
         ]
         return "\n".join(lines)
@@ -228,9 +228,9 @@ class RemediationExecutor:
     ) -> ActionResult:
         self._assert_actionable("create_revert_pr", proof, proof_path_ids)
         body = self._evidence_block(proof, remediation_note)
-        head = branch or f"chronos/revert-{target_id.lower()}-{uuid.uuid4().hex[:6]}"
+        head = branch or f"knot/revert-{target_id.lower()}-{uuid.uuid4().hex[:6]}"
         response = self.github.create_pull_request(
-            title=f"[ChronosGraph] Revert unsafe change on {target_id}",
+            title=f"[Knot] Revert unsafe change on {target_id}",
             body=body,
             head=head,
         )
@@ -263,10 +263,10 @@ class RemediationExecutor:
             sha=commit_sha,
             state="failure",
             description=(
-                f"ChronosGraph blocked merge: {proof.hop_count}-hop blast radius "
+                f"Knot blocked merge: {proof.hop_count}-hop blast radius "
                 f"at confidence {proof.confidence:.2f}"
             ),
-            context="chronosgraph/blast-radius",
+            context="knot/blast-radius",
         )
         return self._record(
             ActionResult(

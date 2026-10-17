@@ -24,7 +24,7 @@ from src.seed import seed_all
 @pytest.fixture(scope="session")
 def store():
     """A live store, or skip the suite when no backend is reachable."""
-    settings = get_settings()
+    settings = replace(get_settings(), allow_memory_fallback=True)
     backend = open_store(settings)
     if backend.name != "falkordb":
         pytest.skip(

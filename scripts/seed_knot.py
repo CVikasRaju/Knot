@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed the ChronosGraph FalkorDB tenants with the demo enterprise."""
+"""Seed the Knot FalkorDB tenants with the demo enterprise."""
 
 import sys
 from pathlib import Path

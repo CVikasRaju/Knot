@@ -1,4 +1,4 @@
-"""Model Context Protocol server exposing the ChronosGraph graph tools."""
+"""Model Context Protocol server exposing the Knot graph tools."""
 
 from .server import build_server, mcp
 
