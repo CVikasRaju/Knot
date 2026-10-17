@@ -5,12 +5,16 @@ import react from '@vitejs/plugin-react'
 // API elsewhere; the dev proxy keeps the browser on one origin so the SSE
 // stream is not treated as cross-site.
 const API_BASE = process.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
+const PORT = Number(process.env.VITE_PORT ?? 5173)
 
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
+    port: PORT,
     host: true,
+    // The workspace exposes this port through a proxy host, so Vite must accept
+    // that Host header instead of rejecting it as an unknown origin.
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: API_BASE,
