@@ -15,6 +15,7 @@ import type {
   PlaybookMatch,
   ProofCertificate,
   ScenarioResult,
+  SemanticRule,
   Suspect,
 } from '../lib/types'
 
@@ -164,6 +165,12 @@ export function ResultPanel({ result, onNodeClick }: Props) {
       {result.playbook_match ? <PlaybookBlock match={result.playbook_match} /> : null}
       {result.episodes && result.episodes.length > 0 ? (
         <EpisodeBlock episodes={result.episodes} />
+      ) : null}
+      {result.semantic_rules && result.semantic_rules.length > 0 ? (
+        <SemanticBlock
+          rules={result.semantic_rules}
+          domain={result.semantic_domain}
+        />
       ) : null}
 
       {/* Provenance ---------------------------------------------------- */}
@@ -405,6 +412,37 @@ function EpisodeBlock({ episodes }: { episodes: Episode[] }) {
                 MTTR {Math.round(ep.incident.mttr_seconds / 60)} min
               </div>
             ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function SemanticBlock({
+  rules,
+  domain,
+}: {
+  rules: SemanticRule[]
+  domain?: string
+}) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Semantic memory</span>
+        <span className="chip">
+          {rules.length} invariant{rules.length === 1 ? '' : 's'}
+          {domain ? ` · ${domain}` : ''}
+        </span>
+      </div>
+      <ul className="list">
+        {rules.map((rule) => (
+          <li key={rule.id}>
+            <div className="mono" style={{ fontSize: 10.5, color: 'var(--memory)' }}>
+              {rule.id}
+              {rule.enforcement_level ? ` · ${rule.enforcement_level}` : ''}
+            </div>
+            <div style={{ fontSize: 12.5 }}>{rule.invariant_statement}</div>
           </li>
         ))}
       </ul>

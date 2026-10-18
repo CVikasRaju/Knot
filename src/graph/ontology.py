@@ -106,7 +106,7 @@ NODES: tuple[NodeSpec, ...] = (
         "SemanticRule",
         "id",
         Track.MEMORY,
-        ("invariant_statement", "enforcement_level", "domain"),
+        ("invariant_statement", "enforcement_level", "domain", "source"),
     ),
     NodeSpec("AgentSession", "id", Track.MEMORY, ("active_agent", "status", "updated_at")),
     NodeSpec(

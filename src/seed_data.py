@@ -567,16 +567,58 @@ SEMANTIC_RULES: list[dict[str, Any]] = [
     {"id": "SR-01",
      "invariant_statement": "No request path may traverse more than three "
      "synchronous service hops.",
-     "domain": "architecture", "enforcement_level": "MUST", "tenant_id": "acme"},
+     "domain": "architecture", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "ADR-007 review"},
     {"id": "SR-02",
      "invariant_statement": "Every Tier-1 service must have a declared p99 "
      "latency budget enforced by an ADR.",
-     "domain": "reliability", "enforcement_level": "MUST", "tenant_id": "acme"},
+     "domain": "reliability", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "post-incident INC-1802"},
     {"id": "SR-03",
      "invariant_statement": "A cache may be bypassed but never required; a cache "
      "miss is not an error state.",
-     "domain": "architecture", "enforcement_level": "SHOULD", "tenant_id": "acme"},
+     "domain": "architecture", "enforcement_level": "SHOULD", "tenant_id": "acme",
+     "source": "ADR-003"},
+    {"id": "SR-04",
+     "invariant_statement": "The AuthPayload scope claim is a frozen contract and "
+     "must not be removed or made optional.",
+     "domain": "auth", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "ADR-019"},
+    {"id": "SR-05",
+     "invariant_statement": "No synchronous retries may be added to the auth "
+     "token path.",
+     "domain": "auth", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "ADR-014"},
+    {"id": "SR-06",
+     "invariant_statement": "Billing reads order state only through OrderGateway, "
+     "never directly from the order store.",
+     "domain": "payments", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "ADR-007"},
+    {"id": "SR-07",
+     "invariant_statement": "Cache misses on the charge path must degrade to the "
+     "database, never to an error.",
+     "domain": "payments", "enforcement_level": "MUST", "tenant_id": "acme",
+     "source": "ADR-003"},
 ]
+
+
+#: Which semantic-memory domain each service's invariants live in. Triage looks
+#: up the symptom service's domain so a payment incident recalls the payment
+#: invariants and not the whole rule book.
+SERVICE_DOMAINS: dict[str, str] = {
+    "SVC-AUTH": "auth",
+    "SVC-PAY": "payments",
+    "SVC-BILL": "payments",
+    "SVC-STRIPE": "payments",
+    "SVC-CACHE": "architecture",
+    "SVC-ORDER": "architecture",
+    "SVC-USER": "architecture",
+    "SVC-ANALYTICS": "architecture",
+    "SVC-RISK": "reliability",
+    "SVC-NOTIF": "reliability",
+    "SVC-SEARCH": "reliability",
+    "SVC-EMAIL": "reliability",
+}
 
 
 # ---------------------------------------------------------------------------

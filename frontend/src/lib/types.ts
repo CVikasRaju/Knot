@@ -172,6 +172,14 @@ export interface Episode {
   matched_tokens?: string[]
 }
 
+/** A standing invariant from semantic memory, scoped to a domain. */
+export interface SemanticRule {
+  id: string
+  invariant_statement: string
+  enforcement_level?: string
+  domain?: string
+}
+
 /** A procedural playbook match. ``action_steps_json`` is a JSON *string*. */
 export interface PlaybookMatch {
   playbook: {
@@ -229,6 +237,8 @@ export interface ScenarioResult {
   experts?: ExpertScore[]
   episodes?: Episode[]
   playbook_match?: PlaybookMatch | null
+  semantic_rules?: SemanticRule[]
+  semantic_domain?: string
   certificates?: ProofCertificate[]
   actions?: ActionRecord[]
   narrative?: string

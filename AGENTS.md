@@ -22,7 +22,7 @@ docker compose up -d falkordb          # REQUIRED before tests; they use the rea
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 python scripts/seed_knot.py --reset
-python -m pytest                       # 81 tests, ~13s
+python -m pytest                       # 91 tests, ~19s
 ```
 
 Useful entry points:
@@ -48,8 +48,17 @@ npm run build                          # production bundle
 
 ## Architecture in one breath
 
-CLI / REST API / MCP server → `SwarmOrchestrator` (4 agents) → graph layer
+CLI / REST API / MCP server → `SwarmOrchestrator` (4 agents) → MCP tool client
+(`mcp_server/client.py`) → MCP server (`mcp_server/server.py`) → graph layer
 (`store.py` + `algorithms.py` + `ontology.py`) → FalkorDB.
+
+**The agents reach the graph only through MCP.** `src/agents/swarm.py` must not
+import `src.graph.*` or `src.actions.*` at runtime (annotation-only imports under
+`if TYPE_CHECKING:` are fine). `tests/test_mcp_routing.py` enforces this by
+parsing the module's imports and by asserting that a live run records its tool
+calls. If you need a new graph operation, add it as an `@mcp.tool` in
+`server.py`, a thin method on `GraphToolClient`, and call it from the agent —
+never import the layer underneath.
 
 Tenants are separate graphs in one FalkorDB instance: `prod_org_brain`,
 `agent_memory`, and ephemeral `shadow_sim_<pr>-<hash>` graphs that are created
