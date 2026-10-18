@@ -200,6 +200,7 @@ export function ResultPanel({ result, onNodeClick }: Props) {
                     {entry.node_id}
                   </button>
                   <span className="mono dim" style={{ fontSize: 10 }}>
+                    {entry.timestamp ? `${entry.timestamp.slice(0, 10)} · ` : ''}
                     {entry.event}
                   </span>
                 </div>

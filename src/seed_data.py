@@ -445,7 +445,7 @@ ADRS: list[dict[str, Any]] = [
         "status": "ACCEPTED",
         "rationale": "Billing must read order state through the gateway so that "
         "order mutations remain auditable in one place.",
-        "created_at": "2026-02-20T09:30:00+00:00", "tenant_id": "acme",
+        "created_at": "2026-08-03T10:00:00+00:00", "tenant_id": "acme",
         "constraint_json": '{"service": "SVC-BILL", "rule": "ADR-007 billing reads order state via gateway", "forbids": []}',
     },
     {
@@ -455,7 +455,7 @@ ADRS: list[dict[str, Any]] = [
         "rationale": "Any code path that treats a cache miss as an error state has "
         "caused an outage. Caches may be bypassed but must never be required, and "
         "a retry must never re-enter a cache lookup it has already failed.",
-        "created_at": "2026-01-15T10:00:00+00:00", "tenant_id": "acme",
+        "created_at": "2026-05-12T10:00:00+00:00", "tenant_id": "acme",
         "constraint_json": '{"service": "SVC-PAY", "rule": "ADR-003 caches are bypassable, never authoritative", "forbids": ["treat_cache_miss_as_error", "synchronous_retry"]}',
     },
 ]
