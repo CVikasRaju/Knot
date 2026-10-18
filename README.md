@@ -22,9 +22,8 @@ as supporting capability, not as separate entries.
 
 ## ⛓️ FalkorDB is load-bearing
 
-This matters for judging, so it is stated plainly: **remove FalkorDB and Knot
-does not work.** The graph is not a visualisation over ordinary storage, and
-there is no non-graph path through the product.
+**Remove FalkorDB and Knot does not work.** The graph is not a visualisation
+over ordinary storage, and there is no non-graph path through the product.
 
 - **The core feature is a graph operation.** Counterfactual simulation is
   `GRAPH.COPY` of the production tenant into a throwaway one, a mutation injected
@@ -63,7 +62,11 @@ Modern software organizations suffer from **structural amnesia** and **blind bla
 | **⚡ The Present** | **Live multi-hop triage.** Runs PageRank / betweenness centrality / shortest-path over the live topology to find the real root cause of an alert, recalls a matching remediation playbook, and executes verified actions. |
 | **🔮 The Future** | **Counterfactual simulation.** Forks the production graph into an ephemeral shadow tenant, injects an unmerged PR's AST changes, and predicts the cascading blast radius and ADR violations *before* the merge. |
 
-> **Implementation note on determinism.** Knot deliberately contains **no LLM and no provider SDK**. Every conclusion is derived from a Cypher traversal or a graph algorithm, and every action ships with a **proof certificate** naming the exact nodes and hops that justified it. A finding is either backed by a reproducible path through the graph or it is not reported — which is what makes the output auditable rather than merely plausible.
+> **Determinism.** Knot contains no LLM and no provider SDK. Every conclusion
+> comes from a Cypher traversal or a graph algorithm, and every action carries a
+> proof certificate naming the nodes and hops that justified it. A finding is
+> either backed by a reproducible path through the graph or it is not reported.
+> That is what makes the output auditable rather than just plausible.
 
 ---
 
@@ -536,17 +539,18 @@ The server exposes eleven tools, all in `src/mcp_server/server.py`:
 | `describe_graph_schema` | Introspect the ontology |
 | `graph_tenant_status` | List tenants and shadow graphs |
 
-**The agents use these tools too.** The swarm does not import the graph layer and
-call it directly — every traversal, algorithm and action goes through
+**The agents use these tools too.** The swarm does not import the graph layer
+and call it directly. Every traversal, algorithm and action goes through
 `src/mcp_server/client.py`, which speaks MCP to the same server an external
-client would. That is not a stylistic choice: it is what makes the tool
-boundary real. If the agents could reach past it, the server would be a
-demonstration of an interface nobody uses, and the tools could drift from the
-code paths that matter without any test noticing. `tests/test_mcp_routing.py`
+client would. This keeps the tool boundary honest: if the agents could reach
+past it, the server would be an interface nobody uses, free to drift from the
+code paths that matter without a test noticing. `tests/test_mcp_routing.py`
 enforces both halves — the swarm imports no graph module, and a live run records
 the MCP calls it made.
 
-**Proof-gated execution.** `execute_verified_remediation` refuses to act without a `proof_path_ids` array produced by a prior traversal. An action that cannot cite the graph path justifying it does not run.
+**Proof-gated execution.** `execute_verified_remediation` refuses to act without
+a `proof_path_ids` array produced by a prior traversal. An action that cannot
+cite the graph path justifying it does not run.
 
 ---
 
@@ -580,6 +584,7 @@ frontend/                3D command center (Vite + React + TypeScript)
   src/components/         GraphStage, AgentTimeline, ResultPanel, NodeInspector
 tests/                   contract + scenario suites (real FalkorDB)
 scripts/                 thin CLI shims
+CONTRIBUTING.md          design decisions, testing notes and known traps
 ```
 
 ---
@@ -626,33 +631,6 @@ to anything.
 
 ---
 
-## 🎬 Demo video
-
-<!-- Replace with your recorded walkthrough before submitting. -->
-**Link:** _to be added_ — a single take showing the three scenarios below in
-order, run against a live FalkorDB, with the 3D command center open.
-
-What the recording shows:
-
-1. **`future_sim` (Track 01).** Simulate `PR-812`, which changes the token
-   timeout in `MOD-AUTH-TOKEN`. The simulator forks production into
-   `shadow_sim_812-*`, injects the mutation, and reports a blast radius of 4
-   impacted services — 2 of them Tier-1 — plus the `ADR-019` and `ADR-014`
-   constraints the change violates. The graph dims to just the inspected nodes
-   as the trace streams.
-2. **`live_incident` (Track 01 + 02).** Trigger `ALT-904`. Triage runs
-   betweenness centrality and a multi-hop walk to isolate the cause, recalls
-   playbook `PB-09` from episodic memory, and the Commander executes a
-   proof-gated revert.
-3. **`archaeology` (Track 03).** Ask why `PaymentService` bypasses Redis on
-   retry. The provenance walk returns `ADR-003`, the Slack thread behind it, and
-   a ranked list of who actually knows the system.
-
-Reproduce it locally with `make demo`, or the three commands in
-[Quick Start step 5](#5-run-a-scenario).
-
----
-
 ## ✅ Submission checklist
 
 | Requirement | Where it is satisfied |
@@ -662,7 +640,6 @@ Reproduce it locally with `make demo`, or the three commands in
 | README with the graph data model | [Graph Data Model](#️-graph-data-model) — 18 node labels, 26 edge types, 3 tenants |
 | Cypher queries the product depends on | [Cypher Queries and Graph Algorithms](#-cypher-queries-and-graph-algorithms) — captured from live runs |
 | Graph algorithms the product depends on | Same section — PageRank, betweenness, shortest path, blast radius, cycles |
-| Demo video | [Demo video](#-demo-video) |
 | Live deployment, or complete local setup | [Quick Start](#-quick-start) — fully local, Docker Compose for the engine |
 | Track entered | [Track entered](#-track-entered) — **Track 01** |
 | FalkorDB is the primary graph database and load-bearing | [FalkorDB is load-bearing](#️-falkordb-is-load-bearing) |
