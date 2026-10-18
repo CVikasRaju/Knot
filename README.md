@@ -7,11 +7,11 @@
 **Track 01 — Agents That Act on Connected Data.**
 
 Knot is entered in Track 01 alone. It also uses the capabilities of Track 02
-(episodic and procedural agent memory) and Track 03 (a unified company brain),
-because the three are not separable here: the memory that makes triage fast is
-stored in the same graph as the company brain that answers *why*, and both are
-read through the same traversals. Those two tracks are described below as
-supporting capability, not as separate entries.
+(episodic, procedural and semantic agent memory) and Track 03 (a unified company
+brain), because the three are not separable here: the memory that makes triage
+fast is stored in the same graph as the company brain that answers *why*, and
+both are read through the same traversals. Those two tracks are described below
+as supporting capability, not as separate entries.
 
 [![FalkorDB](https://img.shields.io/badge/Graph_Engine-FalkorDB-FF5722?style=for-the-badge)](https://www.falkordb.com/)
 [![MCP](https://img.shields.io/badge/Protocol-Model_Context_Protocol-00ADD8?style=for-the-badge)](https://modelcontextprotocol.io/)
@@ -131,19 +131,25 @@ Real output for PR-812 (removes the `scope` claim from `AuthPayload`, adds a 180
                        pressure the ADR banned; projected p99 430ms exceeds the 200ms budget
 ```
 
-### 2. `live_incident` — Multi-hop root cause + episodic recall (Track 01 + 02)
+### 2. `live_incident` — Multi-hop root cause + tri-tier recall (Track 01 + 02)
 
-An alert fires on `PaymentAPI`. The triage agent traces upstream, ranks suspects by hop distance, change recency, declared breaking risk and tier, then matches the symptom signature against **episodic memory** to recall a prior incident and its procedural playbook:
+An alert fires on `PaymentAPI`. The triage agent traces upstream, ranks suspects by hop distance, change recency, declared breaking risk and tier, then consults **all three memory tiers** — the symptom signature against *episodic* incidents, the matching *procedural* playbook, and the *semantic* invariants standing over the affected domain:
 
 ```text
 === EPISODIC MEMORY RECALL ===
   INC-2201 similarity=0.4815 mttr=1680s
+  INC-1802 similarity=0.4483 mttr=900s
   PLAYBOOK PB-09 (Drain and revert the payment retry path) overlap=0.4815 success=0.93
       1. quarantine_endpoint -> SVC-PAY: Isolate the charge endpoint behind a circuit breaker.
       2. create_revert_pr -> MOD-PAY-RETRY: Revert the retry-policy change that introduced the leak.
       3. page_domain_expert -> TEAM-FINOPS: Page the FinOps on-call owner of the charge path.
   reinforced {'id': 'PB-09', 'uses': 5, 'success_rate': 0.944}
-  wrote new episode INC-E7BC19
+  wrote new episode INC-06BB0E
+
+=== SEMANTIC MEMORY (standing invariants) ===
+  2 rule(s) hold over the payments domain:
+      Billing reads order state only through OrderGateway, never directly from the order store.
+      Cache misses on the charge path must degrade to the database, never to an error.
 ```
 
 The resolution is written back as a new `(:EpisodicIncident)` and the playbook's success rate is updated — the memory improves with use.
@@ -213,8 +219,8 @@ cp .env.example .env             # every value already has a working default
 
 ```bash
 python scripts/seed_knot.py --reset
-# [seed] prod_org_brain: 87 nodes / 134 edges
-# [seed] agent_memory:   11 nodes / 7 edges
+# [seed] prod_org_brain: 91 nodes / 134 edges
+# [seed] agent_memory:   18 nodes / 7 edges
 ```
 
 ### 5. Run a scenario
@@ -280,8 +286,8 @@ a simulation a `GRAPH.COPY` instead of a second database.
 
 | Tenant | Created by | Lifetime | Contents |
 | :--- | :--- | :--- | :--- |
-| `prod_org_brain` | `make seed` | permanent | 87 nodes / 134 edges — code, infra, people, decisions, telemetry |
-| `agent_memory` | `make seed` | permanent | 11 nodes / 7 edges — episodic incidents and procedural playbooks, grown by every run |
+| `prod_org_brain` | `make seed` | permanent | 91 nodes / 134 edges — code, infra, people, decisions, telemetry |
+| `agent_memory` | `make seed` | permanent | 18 nodes / 7 edges — episodic incidents and procedural playbooks, grown by every run |
 | `shadow_sim_<pr_id>-<hash>` | a simulation | dropped after the run | an ephemeral fork of production with one PR's mutation injected |
 
 The ontology is defined once in `src/graph/ontology.py` and enforced at seed time
@@ -300,7 +306,7 @@ that is not declared here. The tables below are generated from that file.
 | | `Alert` | `id` | `severity`, `metric`, `value`, `threshold`, `timestamp`, `status`, `summary` |
 | **02 — Memory** | `EpisodicIncident` | `id` | `summary`, `occurred_at`, `root_cause_hash`, `mttr_seconds`, `severity` |
 | | `ProceduralPlaybook` | `id` | `name`, `trigger_signature`, `action_steps_json`, `success_rate`, `uses` |
-| | `SemanticRule` | `id` | `invariant_statement`, `enforcement_level`, `domain` |
+| | `SemanticRule` | `id` | `invariant_statement`, `enforcement_level`, `domain`, `source` |
 | | `AgentSession` | `id` | `active_agent`, `status`, `updated_at` |
 | | `ReasoningStep` | `id` | `step_index`, `agent_name`, `tool_called`, `cypher_executed`, `observation` |
 | **03 — Company brain** | `Person` | `id` | `handle`, `name`, `role`, `timezone`, `on_call` |
@@ -501,7 +507,7 @@ the destination node.
 The suite runs against a **real FalkorDB instance**, not a mock — the bugs worth catching in this project all lived in the boundary with the engine (path edge indices, `GRAPH.DELETE` semantics, duplicate edge-type registries), and a fake store would have hidden every one of them. Start FalkorDB first, then:
 
 ```bash
-python -m pytest              # 81 tests
+python -m pytest              # 91 tests
 ```
 
 Tests use throwaway per-test tenant names (`t_prod_*`, `t_mem_*`, `t_shadow_*`), so they never touch your seeded demo graph, and a fixture fails the suite if a test leaks a shadow tenant.
@@ -514,11 +520,13 @@ Set `KNOT_MEMORY_BACKEND=1` to run against the in-process backend instead; the s
 
 ## 🔌 MCP Tools
 
-The server exposes nine tools, all in `src/mcp_server/server.py`:
+The server exposes eleven tools, all in `src/mcp_server/server.py`:
 
 | Tool | Purpose |
 | :--- | :--- |
 | `graph_multi_hop_investigate` | Bounded traversal from any entity, with an explainable trace |
+| `graph_node_catalog` | Resolve a human name ("PaymentService") to a node id |
+| `resolve_dependents` | One-hop reverse lookup: which services own these modules |
 | `run_graph_topology_algorithm` | PageRank, betweenness, shortest path, cycle detection |
 | `fork_and_simulate_shadow_graph` | Fork production, inject a mutation, predict the blast radius |
 | `memory_read_write_coordinator` | Retrieve similar episodes, store playbooks, record handoffs |
@@ -527,6 +535,16 @@ The server exposes nine tools, all in `src/mcp_server/server.py`:
 | `execute_verified_remediation` | Run an action, gated on a proof certificate |
 | `describe_graph_schema` | Introspect the ontology |
 | `graph_tenant_status` | List tenants and shadow graphs |
+
+**The agents use these tools too.** The swarm does not import the graph layer and
+call it directly — every traversal, algorithm and action goes through
+`src/mcp_server/client.py`, which speaks MCP to the same server an external
+client would. That is not a stylistic choice: it is what makes the tool
+boundary real. If the agents could reach past it, the server would be a
+demonstration of an interface nobody uses, and the tools could drift from the
+code paths that matter without any test noticing. `tests/test_mcp_routing.py`
+enforces both halves — the swarm imports no graph module, and a live run records
+the MCP calls it made.
 
 **Proof-gated execution.** `execute_verified_remediation` refuses to act without a `proof_path_ids` array produced by a prior traversal. An action that cannot cite the graph path justifying it does not run.
 
@@ -550,7 +568,8 @@ src/
     shadow_sim.py   shadow-graph forking, mutation injection, teardown
     remediation.py  action execution + dry-run gate
     expertise.py    ownership and expertise scoring
-  mcp_server/server.py   nine MCP tools
+  mcp_server/server.py   eleven MCP tools
+  mcp_server/client.py   the swarm's MCP client (agents never touch the graph directly)
   api/main.py            REST + SSE endpoints
   seed.py, seed_data.py  the demo enterprise
   scenario.py            CLI scenario runner

@@ -7,6 +7,13 @@ other. Each agent reads the graph, writes a :class:`ReasoningStep` node with
 a precise set of node ids rather than a lossy summary - which is the difference
 between real graph memory and a long prompt.
 
+Tool access model: agents reach the graph **through the MCP server**, via
+:class:`~src.mcp_server.client.GraphToolClient`. They do not import
+``src.graph`` or ``src.actions`` to do their work. That matters for the claim
+being made: "the agent calls graph algorithms as MCP tools" is a statement about
+the execution path, and it is only true if the execution path actually goes
+through the protocol. ``tests/test_mcp_routing.py`` asserts exactly that.
+
 The swarm is intentionally *not* an LLM loop. Each agent is a deterministic
 reasoner over graph algorithms, and the optional LLM layer only narrates. That
 keeps the demo reproducible and makes every decision auditable; an LLM that
@@ -17,33 +24,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
-from ..actions.expertise import ExpertiseRanker
-from ..actions.remediation import ActionResult, RemediationExecutor
-from ..actions.shadow_sim import MutationSpec, ShadowSimulator, SimulationResult
-from ..config import Settings
-from ..graph.algorithms import (
-    AlgorithmResult,
-    betweenness_centrality,
-    detect_cycles,
-    pagerank_criticality,
-)
-from ..graph.investigate import (
-    InvestigationResult,
-    ProvenanceResult,
-    TriageResult,
-    multi_hop_investigate,
-    trace_decision_provenance,
-    triage_incident,
-)
-from ..graph.store import GraphStore
-from ..memory.memory import MemoryStore, structural_signature
+from ..actions.remediation import ActionResult
+from ..mcp_server.client import GraphToolClient
 from ..memory.proof import (
     ProofCertificate,
     ReasoningTrace,
     certificate_from_paths,
 )
+
+if TYPE_CHECKING:  # annotation-only; importing these at runtime would bypass MCP
+    from ..actions.shadow_sim import MutationSpec
+    from ..config import Settings
+    from ..graph.store import GraphStore
 
 
 @dataclass
@@ -80,17 +74,43 @@ class SwarmContext:
         settings: Settings,
         store: GraphStore,
         session_id: str,
-        memory: MemoryStore | None = None,
+        client: GraphToolClient | None = None,
     ) -> None:
         self.settings = settings
-        self.store = store
         self.session_id = session_id
-        self.memory = memory or MemoryStore(store, settings.memory_graph, settings.prod_graph)
+        # The single tool surface every agent uses. Bound to this session's
+        # settings, so tenants cannot bleed between concurrent runs.
+        #
+        # The store handle is deliberately *not* kept on the context. Agents
+        # hold only the client, so there is no attribute through which one could
+        # reach the graph layer and quietly skip the protocol.
+        self.tools = client or GraphToolClient(settings, store)
         self.trace = ReasoningTrace(session_id=session_id)
         self.step_counter = 0
         self.shared: dict[str, Any] = {}
         self.actions: list[ActionResult] = []
-        self.memory.open_session(session_id, active_agent="orchestrator")
+        self.tools.memory_read_write_coordinator(
+            operation="session_open",
+            session_id=session_id,
+            agent_id="orchestrator",
+        )
+
+    def memory(
+        self,
+        operation: str,
+        *,
+        agent_id: str,
+        symptom_signature: str = "",
+        payload: dict | None = None,
+    ) -> dict:
+        """Call the Track 02 memory tool. All memory access goes through here."""
+        return self.tools.memory_read_write_coordinator(
+            operation=operation,
+            session_id=self.session_id,
+            agent_id=agent_id,
+            symptom_signature=symptom_signature,
+            payload=payload or {},
+        )
 
     def record(self, result: AgentStepResult, handoff_to: str | None = None) -> dict:
         """Persist a step to the memory graph and append it to the trace."""
@@ -104,21 +124,23 @@ class SwarmContext:
             inspected=result.inspected_node_ids,
             certificates=[result.certificate] if result.certificate else [],
         )
-        self.memory.record_step(
-            session_id=self.session_id,
-            step_index=self.step_counter,
-            agent_name=result.agent,
-            tool_called=result.tool,
-            cypher_executed=result.cypher,
-            observation=result.observation,
-            inspected_node_ids=result.inspected_node_ids,
-            handoff_to=handoff_to,
-            handoff_context=result.observation[:500],
+        self.memory(
+            "handoff_agent_state",
+            agent_id=result.agent,
+            payload={
+                "step_index": self.step_counter,
+                "tool_called": result.tool,
+                "cypher": result.cypher,
+                "observation": result.observation,
+                "inspected_node_ids": result.inspected_node_ids,
+                "handoff_to": handoff_to,
+                "context_summary": result.observation[:500],
+            },
         )
         return step
 
     def close(self, status: str = "completed") -> None:
-        self.memory.close_session(self.session_id, status=status)
+        self.memory("session_close", agent_id="orchestrator", payload={"status": status})
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +155,6 @@ class ArchaeologistAgent:
 
     def __init__(self, context: SwarmContext) -> None:
         self.ctx = context
-        self.ranker = ExpertiseRanker(context.store, context.settings.prod_graph)
 
     def investigate(self, entity_id: str | None) -> AgentStepResult:
         if not entity_id:
@@ -157,44 +178,47 @@ class ArchaeologistAgent:
                 payload=payload,
             )
 
-        provenance: ProvenanceResult = trace_decision_provenance(
-            self.ctx.store, self.ctx.settings.prod_graph, entity_id
-        )
+        # Track 03 through the MCP tool: one call returns the decision timeline
+        # and the ranked experts, so the agent sees the same payload an external
+        # MCP client would.
+        result = self.ctx.tools.trace_company_decision_provenance(entity_id)
+        provenance = {k: v for k, v in result.items() if k != "experts"}
+        experts = result.get("experts", [])
+
         inspected = [entity_id] + [
-            event["node_id"] for event in provenance.timeline
+            event["node_id"] for event in provenance.get("timeline", [])
         ]
-        experts = self.ranker.rank(entity_id, top_k=5)
 
         certificate = None
-        if provenance.timeline:
+        timeline = provenance.get("timeline", [])
+        if timeline:
             # A provenance walk is assembled from several independent hops
             # rather than one traversal, so the evidence is passed as explicit
             # node ids. Confidence scales with how much authored history exists.
             certificate = certificate_from_paths(
                 claim=(
-                    f"{entity_id} has {len(provenance.timeline)} recorded decision "
+                    f"{entity_id} has {len(timeline)} recorded decision "
                     f"event(s) across PRs, discussions and ADRs."
                 ),
                 graph=self.ctx.settings.prod_graph,
                 paths=[],
-                node_ids=[event["node_id"] for event in provenance.timeline],
-                cypher=self.ctx.store.last_cypher(),
-                confidence=min(0.55 + 0.08 * len(provenance.timeline), 0.95),
+                node_ids=[event["node_id"] for event in timeline],
+                cypher=self.ctx.tools.last_cypher(),
+                confidence=min(0.55 + 0.08 * len(timeline), 0.95),
                 extra_evidence=[
-                    f"{event['event']}: {event['title']}"
-                    for event in provenance.timeline[:8]
+                    f"{event['event']}: {event['title']}" for event in timeline[:8]
                 ],
             )
 
-        observation = provenance.narrative
+        observation = provenance.get("narrative", "")
         if experts:
             observation += (
-                f" Best contact: {experts[0].person.get('handle')} "
-                f"(score {experts[0].score:.2f})."
+                f" Best contact: {experts[0].get('handle')} "
+                f"(score {experts[0].get('ownership_score', 0):.2f})."
             )
 
-        self.ctx.shared["provenance"] = provenance.to_dict()
-        self.ctx.shared["experts"] = [e.to_dict() for e in experts]
+        self.ctx.shared["provenance"] = provenance
+        self.ctx.shared["experts"] = experts
 
         return AgentStepResult(
             agent=self.name,
@@ -202,11 +226,8 @@ class ArchaeologistAgent:
             observation=observation,
             inspected_node_ids=inspected,
             tool="trace_company_decision_provenance",
-            cypher=self.ctx.store.last_cypher(),
-            payload={
-                "provenance": provenance.to_dict(),
-                "experts": [e.to_dict() for e in experts],
-            },
+            cypher=self.ctx.tools.last_cypher(),
+            payload={"provenance": provenance, "experts": experts},
             certificate=certificate,
         )
 
@@ -226,43 +247,58 @@ class SimulatorAgent:
 
     def analyse_topology(self) -> AgentStepResult:
         settings = self.ctx.settings
-        centrality: AlgorithmResult = betweenness_centrality(
-            self.ctx.store, settings.prod_graph
+        # Three separate MCP algorithm calls - the same ones an external client
+        # would issue. PageRank finds the most load-bearing modules, betweenness
+        # finds the single points of failure, and cycle detection finds import
+        # loops that a change could close.
+        centrality = self.ctx.tools.run_graph_topology_algorithm(
+            "betweenness_centrality", subgraph_label="Service"
         )
-        pagerank: AlgorithmResult = pagerank_criticality(
-            self.ctx.store, settings.prod_graph
+        pagerank = self.ctx.tools.run_graph_topology_algorithm(
+            "pagerank_criticality", subgraph_label="Service"
         )
-        cycles: AlgorithmResult = detect_cycles(
-            self.ctx.store, settings.prod_graph
+        cycles = self.ctx.tools.run_graph_topology_algorithm(
+            "cycle_detection", subgraph_label="ASTModule"
         )
 
-        inspected = list(centrality.scores) + list(pagerank.scores)
+        inspected = list(centrality.get("scores", {})) + list(pagerank.get("scores", {}))
         payload = {
-            "betweenness_centrality": centrality.to_dict(),
-            "pagerank_criticality": pagerank.to_dict(),
-            "cycle_detection": cycles.to_dict(),
+            "betweenness_centrality": centrality,
+            "pagerank_criticality": pagerank,
+            "cycle_detection": cycles,
         }
         self.ctx.shared["topology"] = payload
 
-        observation = (
-            f"{centrality.justification} {pagerank.justification} "
-            f"{cycles.justification}"
+        observation = " ".join(
+            part
+            for part in (
+                centrality.get("justification", ""),
+                pagerank.get("justification", ""),
+                cycles.get("justification", ""),
+            )
+            if part
         )
         # Topology analysis is not derived from a single traversal, so the
         # evidence is the ranked nodes themselves. Without them the certificate
         # would carry no node ids and could never clear the action bar.
-        evidence_ids = list(centrality.scores)[:10] + list(pagerank.scores)[:10]
+        evidence_ids = (
+            list(centrality.get("scores", {}))[:10]
+            + list(pagerank.get("scores", {}))[:10]
+        )
         certificate = certificate_from_paths(
             claim=(
-                f"Topology analysis identified {len(centrality.scores)} "
-                f"criticality-ranked nodes and {len(cycles.cycles)} cycle(s)."
+                f"Topology analysis identified {len(centrality.get('scores', {}))} "
+                f"criticality-ranked nodes and {len(cycles.get('cycles', []))} cycle(s)."
             ),
             graph=settings.prod_graph,
             paths=[],
             node_ids=evidence_ids,
-            cypher=self.ctx.store.last_cypher(),
-            confidence=0.9 if centrality.scores else 0.0,
-            extra_evidence=[centrality.justification, cycles.justification],
+            cypher=self.ctx.tools.last_cypher(),
+            confidence=0.9 if centrality.get("scores") else 0.0,
+            extra_evidence=[
+                centrality.get("justification", ""),
+                cycles.get("justification", ""),
+            ],
         )
         return AgentStepResult(
             agent=self.name,
@@ -270,7 +306,7 @@ class SimulatorAgent:
             observation=observation,
             inspected_node_ids=inspected,
             tool="run_graph_topology_algorithm",
-            cypher=self.ctx.store.last_cypher(),
+            cypher=self.ctx.tools.last_cypher(),
             payload=payload,
             certificate=certificate,
         )
@@ -279,45 +315,55 @@ class SimulatorAgent:
         self, pr_id: str, mutation: MutationSpec, max_hops: int = 5
     ) -> AgentStepResult:
         settings = self.ctx.settings
-        simulator = ShadowSimulator(
-            self.ctx.store,
-            settings.prod_graph,
-            settings.shadow_prefix,
-            settings.criticality_alert_threshold,
+        # The whole counterfactual runs inside the MCP tool: fork, inject,
+        # measure, tear down. The agent never touches the shadow tenant itself.
+        result = self.ctx.tools.fork_and_simulate_shadow_graph(
+            pr_number=pr_id,
+            modified_modules=mutation.modified_module_ids,
+            breaking_schema_changes=mutation.breaking_schema_change,
+            simulated_latency_delta_ms=mutation.latency_delta_ms,
+            removed_schema_field_ids=mutation.removed_schema_field_ids,
+            added_schema_field_ids=mutation.added_schema_field_ids,
+            added_call_edges=mutation.added_call_edges,
+            removed_call_edges=mutation.removed_call_edges,
+            added_import_edges=mutation.added_import_edges,
+            max_hops=max_hops,
         )
-        result: SimulationResult = simulator.simulate(
-            pr_id, mutation, max_hops=max_hops
-        )
-        payload = result.to_dict()
+        payload = result
         self.ctx.shared["simulation"] = payload
 
-        inspected = [pr_id] + [s["id"] for s in result.impacted_services]
-        inspected += [v.adr["id"] for v in result.adr_violations]
+        inspected = [pr_id] + [s["id"] for s in result.get("impacted_services", [])]
+        inspected += [v["adr"]["id"] for v in result.get("adr_violations", [])]
 
+        # The proof path is a real traversal from the PR through the modules it
+        # touches and out along the call graph - requested through MCP so the
+        # evidence and the simulation come from the same protocol surface.
+        path_trace = self.ctx.tools.graph_multi_hop_investigate(
+            pr_id,
+            max_hops=max_hops,
+            relationship_filter=["MODIFIES", "IMPLEMENTED_BY", "CALLS"],
+            direction="out",
+        )
         certificate = certificate_from_paths(
             claim=(
-                f"Shadow simulation of {pr_id} predicts {result.verdict} with "
-                f"{len(result.impacted_services)} impacted service(s)."
+                f"Shadow simulation of {pr_id} predicts {result.get('verdict')} with "
+                f"{len(result.get('impacted_services', []))} impacted service(s)."
             ),
             graph=settings.prod_graph,
-            paths=self.ctx.store.traverse(
-                settings.prod_graph,
-                pr_id,
-                max_hops,
-                relationship_types=["MODIFIES", "IMPLEMENTED_BY", "CALLS"],
-                direction="out",
-                limit=50,
-            ),
-            confidence=result.confidence,
-            extra_evidence=[result.narrative],
+            paths=[],
+            node_ids=list(dict.fromkeys(inspected)),
+            cypher=self.ctx.tools.last_cypher(),
+            confidence=float(result.get("confidence", 0.0)),
+            extra_evidence=[result.get("narrative", "")],
         )
+        payload["proof_trace_hops"] = len(path_trace.get("hop_paths", []))
         return AgentStepResult(
             agent=self.name,
             action=f"fork_and_simulate_shadow_graph({pr_id})",
-            observation=result.narrative,
+            observation=result.get("narrative", ""),
             inspected_node_ids=inspected,
             tool="fork_and_simulate_shadow_graph",
-            cypher=self.ctx.store.last_cypher(),
+            cypher=self.ctx.tools.last_cypher(),
             payload=payload,
             certificate=certificate,
         )
@@ -338,70 +384,90 @@ class TriageAgent:
 
     def investigate_alert(self, alert_id: str) -> AgentStepResult:
         settings = self.ctx.settings
-        triage: TriageResult = triage_incident(
-            self.ctx.store,
-            settings.prod_graph,
+        # One MCP call does the multi-hop root-cause walk and the episodic +
+        # procedural recall, and returns them together.
+        triage = self.ctx.tools.triage_live_incident(
             alert_id,
             window_hours=settings.recent_change_window_hours,
+            max_hops=settings.max_hops,
         )
-        self.ctx.shared["triage"] = triage.to_dict()
+        self.ctx.shared["triage"] = triage
 
-        # Episodic recall: match the structural signature against past incidents
-        # and the procedural playbook derived from them.
-        episodes = self.ctx.memory.retrieve_similar_episodes(triage.signature, top_k=3)
-        playbook_match = self.ctx.memory.retrieve_playbook(triage.signature)
+        signature = triage.get("signature", "")
+        episodes = triage.get("episodes", [])
+        playbook_match = triage.get("playbook_match")
+
+        # Track 02 semantic memory: the invariants that apply to this service,
+        # independent of which incident is in front of us. Episodic memory says
+        # what happened last time; semantic memory says what must stay true.
+        symptom = triage.get("symptom_service") or {}
+        domain = _service_domain(symptom.get("id", ""))
+        semantic = self.ctx.memory(
+            "recall_semantic_rules",
+            agent_id=self.name,
+            payload={"domain": domain},
+        )
+        rules = semantic.get("rules", [])
+        self.ctx.shared["semantic_rules"] = rules
+        self.ctx.shared["semantic_domain"] = domain
 
         inspected = [alert_id]
-        if triage.symptom_service:
-            inspected.append(triage.symptom_service["id"])
-        for suspect in triage.suspects:
-            inspected.append(suspect.service["id"])
-            if suspect.pr:
-                inspected.append(suspect.pr["id"])
+        if symptom:
+            inspected.append(symptom["id"])
+        for suspect in triage.get("suspects", []):
+            inspected.append(suspect["service"]["id"])
+            if suspect.get("pr"):
+                inspected.append(suspect["pr"]["id"])
+        inspected += [r["id"] for r in rules]
 
-        observation = triage.narrative
+        observation = triage.get("narrative", "")
         if episodes:
             best = episodes[0]
             observation += (
-                f" Episodic memory matched {best.incident.get('id')} at "
-                f"{best.similarity:.0%} structural similarity "
-                f"(MTTR {best.incident.get('mttr_seconds')}s)."
+                f" Episodic memory matched {best['incident'].get('id')} at "
+                f"{best['similarity']:.0%} structural similarity "
+                f"(MTTR {best['incident'].get('mttr_seconds')}s)."
             )
         if playbook_match:
             observation += (
-                f" Procedural playbook {playbook_match.playbook.get('id')} "
-                f"({playbook_match.playbook.get('name')}) applies with "
-                f"{playbook_match.similarity:.0%} signature overlap and a "
-                f"{float(playbook_match.playbook.get('success_rate') or 0):.0%} "
+                f" Procedural playbook {playbook_match['playbook'].get('id')} "
+                f"({playbook_match['playbook'].get('name')}) applies with "
+                f"{playbook_match['similarity']:.0%} signature overlap and a "
+                f"{float(playbook_match['playbook'].get('success_rate') or 0):.0%} "
                 f"historical success rate."
+            )
+        if rules:
+            observation += (
+                f" Semantic memory holds {len(rules)} standing invariant(s) for "
+                f"the {domain} domain: "
+                + "; ".join(r["invariant_statement"] for r in rules[:2])
+                + "."
             )
 
         payload = {
-            "triage": triage.to_dict(),
-            "episodes": [e.to_dict() for e in episodes],
-            "playbook_match": playbook_match.to_dict() if playbook_match else None,
+            "triage": triage,
+            "episodes": episodes,
+            "playbook_match": playbook_match,
+            "semantic_rules": rules,
+            "semantic_domain": domain,
         }
-        self.ctx.shared["episodes"] = [e.to_dict() for e in episodes]
-        self.ctx.shared["playbook_match"] = (
-            playbook_match.to_dict() if playbook_match else None
-        )
+        self.ctx.shared["episodes"] = episodes
+        self.ctx.shared["playbook_match"] = playbook_match
 
+        suspects = triage.get("suspects", [])
         certificate = certificate_from_paths(
             claim=(
                 f"Alert {alert_id} traces to "
-                f"{triage.suspects[0].service.get('name') if triage.suspects else 'no suspect'}"
-                f" with a structural signature matching {len(episodes)} past incident(s)."
+                f"{suspects[0]['service'].get('name') if suspects else 'no suspect'}"
+                f" with a structural signature matching {len(episodes)} past incident(s)"
+                f" and {len(rules)} standing invariant(s)."
             ),
             graph=settings.prod_graph,
-            paths=self.ctx.store.traverse(
-                settings.prod_graph,
-                alert_id,
-                max_hops=settings.max_hops,
-                direction="out",
-                limit=50,
-            ),
-            confidence=0.92 if triage.suspects else 0.35,
-            extra_evidence=[triage.narrative],
+            paths=[],
+            node_ids=list(dict.fromkeys(inspected)),
+            cypher=self.ctx.tools.last_cypher(),
+            confidence=0.92 if suspects else 0.35,
+            extra_evidence=[triage.get("narrative", "")],
         )
         return AgentStepResult(
             agent=self.name,
@@ -409,7 +475,7 @@ class TriageAgent:
             observation=observation,
             inspected_node_ids=inspected,
             tool="graph_multi_hop_investigate + memory_read_write_coordinator",
-            cypher=self.ctx.store.last_cypher(),
+            cypher=self.ctx.tools.last_cypher(),
             payload=payload,
             certificate=certificate,
         )
@@ -425,9 +491,8 @@ class CommanderAgent:
 
     name = "commander"
 
-    def __init__(self, context: SwarmContext, executor: RemediationExecutor) -> None:
+    def __init__(self, context: SwarmContext) -> None:
         self.ctx = context
-        self.executor = executor
 
     def decide_and_act(
         self,
@@ -460,18 +525,19 @@ class CommanderAgent:
                 experts = self.ctx.shared.get("experts") or []
                 if experts:
                     expert = experts[0]
-                result = self.executor.page_domain_expert(
-                    target_id=focus_id,
-                    proof=best,
-                    proof_path_ids=best.node_ids,
-                    remediation_note=(
-                        "Confidence below the autonomous action threshold; "
-                        "routing to the domain expert for a human decision."
-                    ),
-                    expert_handle=(expert or {}).get("handle", ""),
-                    team=(expert or {}).get("team", ""),
+                executed.append(
+                    self._call_action(
+                        "page_domain_expert",
+                        target_id=focus_id,
+                        proof=best,
+                        remediation_note=(
+                            "Confidence below the autonomous action threshold; "
+                            "routing to the domain expert for a human decision."
+                        ),
+                        expert_handle=(expert or {}).get("handle", ""),
+                        team=(expert or {}).get("team", ""),
+                    )
                 )
-                executed.append(result)
         else:
             decisions.append(
                 f"Certificate {best.certificate_id} cleared the bar at "
@@ -507,42 +573,85 @@ class CommanderAgent:
             observation=observation,
             inspected_node_ids=list(best.node_ids) if best else [],
             tool="execute_verified_remediation",
-            cypher=self.ctx.store.last_cypher(),
+            cypher=self.ctx.tools.last_cypher(),
             payload=payload,
             certificate=best,
+        )
+
+    def _call_action(
+        self,
+        action_type: str,
+        *,
+        target_id: str,
+        proof: ProofCertificate,
+        remediation_note: str,
+        **extra,
+    ) -> ActionResult:
+        """Invoke the gated remediation tool over MCP.
+
+        The certificate travels with the call, so the tool can enforce its own
+        proof bar server-side. A refusal comes back as a structured result
+        rather than an exception, because a refused action is a normal outcome
+        the trace should record.
+        """
+        result = self.ctx.tools.execute_verified_remediation(
+            action_type=action_type,
+            target_id=target_id,
+            proof_path_ids=proof.node_ids,
+            remediation_note=remediation_note,
+            claim=proof.claim,
+            confidence=proof.confidence,
+            certificate_id=proof.certificate_id,
+            graph=proof.graph,
+            expert_handle=extra.get("expert_handle", ""),
+            team=extra.get("team", ""),
+            stale_doc_ids=extra.get("stale_doc_ids"),
+            patch_summary=extra.get("patch_summary", ""),
+        )
+        if result.get("refused"):
+            return ActionResult(
+                action_type=action_type,
+                target_id=target_id,
+                status="REFUSED",
+                summary=f"Executor refused: {result.get('reason', '')}",
+                dry_run=True,
+                certificate_id=proof.certificate_id,
+            )
+        return ActionResult(
+            action_type=result.get("action_type", action_type),
+            target_id=result.get("target_id", target_id),
+            status=result.get("status", "UNKNOWN"),
+            summary=result.get("summary", ""),
+            dry_run=bool(result.get("dry_run", True)),
+            certificate_id=result.get("certificate_id", proof.certificate_id),
+            external_ref=result.get("external_ref", ""),
+            payload=result.get("payload", {}),
         )
 
     def _execute(self, action: dict, proof: ProofCertificate) -> ActionResult | None:
         kind = action.get("action_type") or action.get("type")
         target = action.get("target_id") or action.get("target") or ""
         note = action.get("remediation_note") or action.get("detail") or ""
-        kwargs = {
-            "target_id": target,
-            "proof": proof,
-            "proof_path_ids": proof.node_ids,
-            "remediation_note": note,
-        }
+        if kind not in {
+            "create_revert_pr",
+            "block_ci_merge",
+            "apply_hotfix_patch",
+            "sync_stale_adr_doc",
+            "page_domain_expert",
+            "quarantine_endpoint",
+        }:
+            return None
         try:
-            if kind == "create_revert_pr":
-                return self.executor.create_revert_pr(**kwargs)
-            if kind == "block_ci_merge":
-                return self.executor.block_ci_merge(**kwargs)
-            if kind == "apply_hotfix_patch":
-                return self.executor.apply_hotfix_patch(
-                    **kwargs, patch_summary=action.get("patch_summary", "")
-                )
-            if kind == "sync_stale_adr_doc":
-                return self.executor.sync_stale_adr_doc(
-                    **kwargs, stale_doc_ids=action.get("stale_doc_ids", [])
-                )
-            if kind == "page_domain_expert":
-                return self.executor.page_domain_expert(
-                    **kwargs,
-                    expert_handle=action.get("expert_handle", ""),
-                    team=action.get("team", ""),
-                )
-            if kind == "quarantine_endpoint":
-                return self.executor.quarantine_endpoint(**kwargs)
+            return self._call_action(
+                str(kind),
+                target_id=target,
+                proof=proof,
+                remediation_note=note,
+                patch_summary=action.get("patch_summary", ""),
+                stale_doc_ids=action.get("stale_doc_ids"),
+                expert_handle=action.get("expert_handle", ""),
+                team=action.get("team", ""),
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced in the trace
             return ActionResult(
                 action_type=str(kind),
@@ -552,7 +661,6 @@ class CommanderAgent:
                 dry_run=True,
                 certificate_id=proof.certificate_id,
             )
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -573,13 +681,12 @@ class SwarmOrchestrator:
         self,
         settings: Settings,
         store: GraphStore,
-        executor: RemediationExecutor | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
-        self.executor = executor or RemediationExecutor(
-            dry_run=settings.actions_dry_run
-        )
+        # One tool client per orchestrator. Sessions bind their own so tenant
+        # settings cannot bleed, but the surface is identical.
+        self.tools = GraphToolClient(settings, store)
 
     @staticmethod
     def _emit(on_event, kind: str, payload: dict) -> None:
@@ -591,7 +698,9 @@ class SwarmOrchestrator:
             pass
 
     def new_context(self, session_id: str) -> SwarmContext:
-        return SwarmContext(self.settings, self.store, session_id)
+        return SwarmContext(
+            self.settings, self.store, session_id, client=self.tools
+        )
 
     def run_future_simulation(
         self,
@@ -606,7 +715,7 @@ class SwarmOrchestrator:
         ctx = self.new_context(session_id)
         simulator = SimulatorAgent(ctx)
         archaeologist = ArchaeologistAgent(ctx)
-        commander = CommanderAgent(ctx, self.executor)
+        commander = CommanderAgent(ctx)
 
         steps: list[dict] = []
         self._emit(on_event, "session_start",
@@ -631,13 +740,8 @@ class SwarmOrchestrator:
         # governs the code the PR touches.
         focus = "SVC-AUTH"
         if origin:
-            owners = [
-                edge["source"]
-                for edge in self.store.snapshot(
-                    self.settings.prod_graph, limit=8000
-                ).edges
-                if edge["type"] == "IMPLEMENTED_BY" and edge["target"] in origin
-            ]
+            dependents = ctx.tools.resolve_dependents(origin)
+            owners = dependents.get("dependents", [])
             focus = owners[0] if owners else focus
 
         self._emit(on_event, "agent_start",
@@ -721,7 +825,7 @@ class SwarmOrchestrator:
         ctx = self.new_context(session_id)
         simulator = SimulatorAgent(ctx)
         triage_agent = TriageAgent(ctx)
-        commander = CommanderAgent(ctx, self.executor)
+        commander = CommanderAgent(ctx)
 
         steps: list[dict] = []
         self._emit(on_event, "session_start",
@@ -831,32 +935,41 @@ class SwarmOrchestrator:
             # id the memory graph already holds. Reusing a seeded id (or an id
             # that collapses to the same string) would silently overwrite
             # history, which is the one thing an episodic store must never do.
-            existing_episode_ids = {
-                row["id"]
-                for row in ctx.memory.store.find_nodes(
-                    self.settings.memory_graph, "EpisodicIncident", limit=500
-                )
-            }
+            existing = ctx.memory(
+                "list_episodes",
+                agent_id="orchestrator",
+                payload={"limit": 500},
+            )
+            existing_episode_ids = set(existing.get("episode_ids", []))
             suffix = session_id.replace("SESS-", "").replace("-", "")[-6:].upper()
             incident_id = f"INC-{suffix}"
             attempt = 0
             while incident_id in existing_episode_ids:
                 attempt += 1
                 incident_id = f"INC-{suffix}{attempt}"
-            ctx.memory.store_episode(
-                incident_id=incident_id,
-                summary=triage_payload.get("narrative", ""),
+            ctx.memory(
+                "store_episode",
+                agent_id="orchestrator",
                 symptom_signature=signature,
-                affected_service_ids=affected,
-                severity=(triage_payload.get("alert") or {}).get("severity", "SEV2"),
-                mttr_seconds=0,
-                extra={"source_alert": alert_id, "session_id": session_id},
+                payload={
+                    "incident_id": incident_id,
+                    "summary": triage_payload.get("narrative", ""),
+                    "affected_service_ids": affected,
+                    "severity": (triage_payload.get("alert") or {}).get("severity", "SEV2"),
+                    "mttr_seconds": 0,
+                    "source_alert": alert_id,
+                },
             )
             if playbook_match:
                 succeeded = any(a.status != "REFUSED" for a in ctx.actions)
-                reinforced = ctx.memory.reinforce_playbook(
-                    playbook_match["playbook"]["id"], succeeded
-                )
+                reinforced = ctx.memory(
+                    "reinforce_playbook",
+                    agent_id="orchestrator",
+                    payload={
+                        "playbook_id": playbook_match["playbook"]["id"],
+                        "succeeded": succeeded,
+                    },
+                ).get("reinforced_playbook")
 
         ctx.close("completed")
         result = {
@@ -867,6 +980,8 @@ class SwarmOrchestrator:
             "triage": triage_payload,
             "episodes": ctx.shared.get("episodes"),
             "playbook_match": playbook_match,
+            "semantic_rules": ctx.shared.get("semantic_rules") or [],
+            "semantic_domain": ctx.shared.get("semantic_domain") or "",
             "reinforced_playbook": reinforced,
             "new_episode_id": incident_id,
             "commander": ctx.shared.get("commander"),
@@ -933,11 +1048,14 @@ class SwarmOrchestrator:
         Returns ``None`` when nothing matches. Falling back to "some service"
         would produce a confident, sourced, and entirely irrelevant answer.
         """
-        snapshot = self.store.snapshot(self.settings.prod_graph, limit=8000)
+        # Resolution runs through the MCP catalog tool, so the swarm's only view
+        # of the graph is the same one an external client gets.
+        catalog = self.tools.graph_node_catalog()
+        nodes = catalog.get("nodes", [])
         lowered = query.lower()
 
         # Pass 1: explicit ids.
-        for node in snapshot.nodes:
+        for node in nodes:
             if node["id"].lower() in lowered:
                 return node["id"]
 
@@ -946,7 +1064,7 @@ class SwarmOrchestrator:
         # so both sides are reduced to a suffix-stripped stem before comparing.
         query_stems = _stems(lowered)
         best: tuple[float, str] | None = None
-        for node in snapshot.nodes:
+        for node in nodes:
             candidates = [
                 node.get("name"),
                 node.get("code"),
@@ -970,6 +1088,36 @@ class SwarmOrchestrator:
         if best:
             return best[1]
         return None
+
+
+#: Which semantic-memory domain a service's invariants live in. Mirrors
+#: ``src.seed_data.SERVICE_DOMAINS`` so a live triage resolves the same domain a
+#: seeded run does. Kept local rather than imported so the swarm does not reach
+#: into the seeder for runtime behaviour.
+_SERVICE_DOMAINS: dict[str, str] = {
+    "SVC-AUTH": "auth",
+    "SVC-PAY": "payments",
+    "SVC-BILL": "payments",
+    "SVC-STRIPE": "payments",
+    "SVC-CACHE": "architecture",
+    "SVC-ORDER": "architecture",
+    "SVC-USER": "architecture",
+    "SVC-ANALYTICS": "architecture",
+    "SVC-RISK": "reliability",
+    "SVC-NOTIF": "reliability",
+    "SVC-SEARCH": "reliability",
+    "SVC-EMAIL": "reliability",
+}
+
+
+def _service_domain(service_id: str) -> str:
+    """Domain whose semantic rules constrain a service.
+
+    Falls back to the broad ``architecture`` domain, whose invariants are the
+    ones that hold everywhere, rather than to an empty result that would silently
+    report "no constraints apply".
+    """
+    return _SERVICE_DOMAINS.get(service_id, "architecture")
 
 
 #: Generic suffixes that carry no discriminating meaning in a service name.

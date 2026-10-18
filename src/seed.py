@@ -320,6 +320,19 @@ def seed_memory(store: GraphStore, memory_graph: str, prod_graph: str) -> dict[s
             derived_from_incident=playbook["derived_from"],
         )
     counts["ProceduralPlaybook"] = len(sd.PLAYBOOKS)
+
+    # Semantic memory: the invariants that hold regardless of which incident is
+    # being triaged. These are the third tier - episodic recalls what happened,
+    # procedural recalls what to do, semantic recalls what must stay true.
+    for rule in sd.SEMANTIC_RULES:
+        memory.store_rule(
+            rule_id=rule["id"],
+            statement=rule["invariant_statement"],
+            domain=rule["domain"],
+            enforcement_level=rule["enforcement_level"],
+            source=rule.get("source", "seeded architecture review"),
+        )
+    counts["SemanticRule"] = len(sd.SEMANTIC_RULES)
     return counts
 
 

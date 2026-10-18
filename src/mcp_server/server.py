@@ -61,6 +61,19 @@ mcp: FastMCP = FastMCP(
 _state: dict[str, Any] = {}
 
 
+def bind(settings: Settings, store: GraphStore) -> None:
+    """Pin the server to an explicit settings/store pair.
+
+    The swarm uses this so every tool call resolves against the tenant it was
+    given rather than whatever ``get_settings()`` happens to return. Without it
+    a test tenant and a demo tenant in the same process would share state.
+    """
+    _state["settings"] = settings
+    _state["store"] = store
+    _state.pop("memory", None)
+    _state.pop("executor", None)
+
+
 def _settings() -> Settings:
     if "settings" not in _state:
         _state["settings"] = get_settings()
@@ -73,16 +86,21 @@ def _store() -> GraphStore:
     return _state["store"]
 
 
-def _memory() -> MemoryStore:
-    if "memory" not in _state:
-        _state["memory"] = MemoryStore(_store(), _settings().memory_graph, _settings().prod_graph)
-    return _state["memory"]
+def _memory(memory_graph: str = "", prod_graph: str = "") -> MemoryStore:
+    settings = _settings()
+    memory_graph = memory_graph or settings.memory_graph
+    prod_graph = prod_graph or settings.prod_graph
+    # A MemoryStore is cheap and stateless between calls, so a per-tenant
+    # instance is built rather than cached - caching would return a store bound
+    # to whichever tenant happened to call first.
+    return MemoryStore(_store(), memory_graph, prod_graph)
 
 
-def _executor() -> RemediationExecutor:
+def _executor(dry_run: bool | None = None) -> RemediationExecutor:
+    if dry_run is not None:
+        return RemediationExecutor(dry_run=dry_run)
     if "executor" not in _state:
-        settings = _settings()
-        _state["executor"] = RemediationExecutor(dry_run=settings.actions_dry_run)
+        _state["executor"] = RemediationExecutor(dry_run=_settings().actions_dry_run)
     return _state["executor"]
 
 
@@ -132,6 +150,87 @@ def graph_multi_hop_investigate(
         direction=direction,
     )
     return _json(result.to_dict())
+
+
+@mcp.tool
+def resolve_dependents(
+    node_ids: list[str],
+    relationship_type: str = "IMPLEMENTED_BY",
+    tenant_graph: str = "",
+) -> str:
+    """Find the nodes on the other side of a relationship from a set of ids.
+
+    This is the "who owns this module?" question: given the modules a PR
+    touches, return the services that implement them. It is a one-hop lookup
+    rather than a traversal, so it is its own tool instead of a special case of
+    ``graph_multi_hop_investigate``.
+
+    Args:
+        node_ids: Ids to look up (e.g. the modules a PR modifies).
+        relationship_type: Edge type to follow, from target back to source.
+        tenant_graph: Graph tenant name.
+
+    Returns:
+        JSON with the distinct source ids that point at ``node_ids``.
+    """
+    settings = _settings()
+    graph = tenant_graph or settings.prod_graph
+    wanted = set(node_ids)
+    owners: list[str] = []
+    for edge in _store().snapshot(graph, limit=8000).edges:
+        if edge["type"] == relationship_type and edge["target"] in wanted:
+            if edge["source"] not in owners:
+                owners.append(edge["source"])
+    return _json(
+        {
+            "relationship_type": relationship_type,
+            "node_ids": list(node_ids),
+            "dependents": owners,
+            "count": len(owners),
+        }
+    )
+
+
+@mcp.tool
+def graph_node_catalog(
+    labels: list[str] | None = None,
+    limit: int = 8000,
+    tenant_graph: str = "",
+) -> str:
+    """Return a lightweight catalog of nodes for id and name resolution.
+
+    Agents need to turn a human reference ("why does PaymentService bypass
+    Redis?") into a node id before they can traverse. Returning every node's
+    id, label and candidate display names in one call is far cheaper than
+    probing label by label, and it keeps that resolution on the protocol
+    surface rather than reaching into the store.
+
+    Args:
+        labels: Restrict to these node labels. Defaults to all of them.
+        limit: Maximum nodes to return.
+        tenant_graph: Graph tenant name.
+
+    Returns:
+        JSON list of ``{id, label, name, code, key, file_path}`` entries.
+    """
+    settings = _settings()
+    graph = tenant_graph or settings.prod_graph
+    wanted = set(labels or [])
+    catalog: list[dict] = []
+    for node in _store().snapshot(graph, limit=limit).nodes:
+        if wanted and node.get("label") not in wanted:
+            continue
+        catalog.append(
+            {
+                "id": node["id"],
+                "label": node.get("label", ""),
+                "name": node.get("name", ""),
+                "code": node.get("code", ""),
+                "key": node.get("key", ""),
+                "file_path": node.get("file_path", ""),
+            }
+        )
+    return _json({"graph": graph, "count": len(catalog), "nodes": catalog})
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +304,11 @@ def fork_and_simulate_shadow_graph(
     diff_text: str = "",
     breaking_schema_changes: bool = False,
     simulated_latency_delta_ms: float = 0.0,
+    removed_schema_field_ids: list[str] | None = None,
+    added_schema_field_ids: list[str] | None = None,
+    added_call_edges: list[list[str]] | None = None,
+    removed_call_edges: list[list[str]] | None = None,
+    added_import_edges: list[list[str]] | None = None,
     max_hops: int = 5,
     keep_shadow: bool = False,
 ) -> str:
@@ -213,12 +317,23 @@ def fork_and_simulate_shadow_graph(
     The fork is a real FalkorDB graph copy, so the prediction is a traversal that
     can be replayed. The shadow tenant is dropped again unless ``keep_shadow``.
 
+    A caller may supply either ``diff_text`` (parsed with tree-sitter here) or a
+    fully-formed mutation through the explicit edge/field arguments. The explicit
+    form exists so a caller that has already parsed the diff does not have to
+    hand its text back for a second parse - and so no part of the mutation is
+    silently dropped on the way in.
+
     Args:
         pr_number: Pull request identifier, e.g. "PR-812".
         modified_modules: ASTModule ids the PR touches.
         diff_text: Unified diff; parsed with tree-sitter to derive the delta.
         breaking_schema_changes: Assert that the PR breaks a payload contract.
         simulated_latency_delta_ms: Latency the PR is expected to add.
+        removed_schema_field_ids: Schema fields the PR removes.
+        added_schema_field_ids: Schema fields the PR introduces.
+        added_call_edges: ``[source, target]`` call edges the PR adds.
+        removed_call_edges: ``[source, target]`` call edges the PR removes.
+        added_import_edges: ``[from, to]`` imports the PR introduces.
         max_hops: Propagation depth for the blast radius.
         keep_shadow: Keep the shadow tenant for inspection instead of dropping it.
 
@@ -244,6 +359,11 @@ def fork_and_simulate_shadow_graph(
     else:
         mutation = MutationSpec(
             modified_module_ids=list(modified_modules or []),
+            removed_schema_field_ids=list(removed_schema_field_ids or []),
+            added_schema_field_ids=list(added_schema_field_ids or []),
+            added_call_edges=[tuple(e) for e in (added_call_edges or [])],
+            removed_call_edges=[tuple(e) for e in (removed_call_edges or [])],
+            added_import_edges=[tuple(e) for e in (added_import_edges or [])],
             breaking_schema_change=breaking_schema_changes,
             latency_delta_ms=simulated_latency_delta_ms,
         )
@@ -271,21 +391,26 @@ def memory_read_write_coordinator(
     agent_id: str,
     symptom_signature: str = "",
     payload: dict | None = None,
+    memory_graph: str = "",
+    prod_graph: str = "",
 ) -> str:
     """Read or persist episodic, semantic and procedural agent memory.
 
     Args:
         operation: One of "retrieve_similar_episode", "retrieve_playbook",
-            "store_episode", "store_procedural_playbook", "handoff_agent_state".
+            "store_episode", "store_procedural_playbook", "store_semantic_rule",
+            "recall_semantic_rules", "handoff_agent_state".
         session_id: Agent session id.
         agent_id: Name of the calling agent.
         symptom_signature: Structural signature to match against.
         payload: Operation-specific body.
+        memory_graph: Memory tenant name. Defaults to the configured one.
+        prod_graph: Production tenant name, for mirroring referenced nodes.
 
     Returns:
         JSON with the matched memories or the persisted node.
     """
-    memory = _memory()
+    memory = _memory(memory_graph, prod_graph)
     payload = payload or {}
 
     if operation == "retrieve_similar_episode":
@@ -295,6 +420,25 @@ def memory_read_write_coordinator(
     if operation == "retrieve_playbook":
         match = memory.retrieve_playbook(symptom_signature)
         return _json({"playbook_match": match.to_dict() if match else None})
+
+    if operation == "recall_semantic_rules":
+        # Semantic memory: the invariants that must hold regardless of which
+        # incident is being triaged. Read by domain, so a triage on a payment
+        # service gets the payment constraints and not the whole rule book.
+        domain = payload.get("domain", "")
+        rules = memory.rules_for_domain(domain) if domain else memory.all_rules()
+        return _json({"domain": domain, "rules": rules, "count": len(rules)})
+
+    if operation == "store_semantic_rule":
+        stored = memory.store_rule(
+            rule_id=payload.get("rule_id") or f"SR-{session_id[-6:]}",
+            statement=payload.get("invariant_statement", ""),
+            domain=payload.get("domain", "architecture"),
+            enforcement_level=payload.get("enforcement_level", "MUST"),
+            source=payload.get("source", ""),
+            extra={"agent_id": agent_id, "session_id": session_id},
+        )
+        return _json({"stored_rule": stored})
 
     if operation == "store_episode":
         stored = memory.store_episode(
@@ -319,6 +463,27 @@ def memory_read_write_coordinator(
         )
         return _json({"stored_playbook": stored})
 
+    if operation == "reinforce_playbook":
+        updated = memory.reinforce_playbook(
+            payload.get("playbook_id", ""), bool(payload.get("succeeded", True))
+        )
+        return _json({"reinforced_playbook": updated})
+
+    if operation == "list_episodes":
+        episodes = memory.store.find_nodes(
+            memory.graph, "EpisodicIncident", limit=int(payload.get("limit", 500))
+        )
+        return _json({"episode_ids": [row["id"] for row in episodes]})
+
+    if operation == "session_open":
+        return _json(
+            {"session": memory.open_session(session_id, active_agent=agent_id)}
+        )
+
+    if operation == "session_close":
+        memory.close_session(session_id, status=payload.get("status", "completed"))
+        return _json({"session_id": session_id, "status": payload.get("status", "completed")})
+
     if operation == "handoff_agent_state":
         step = memory.record_step(
             session_id=session_id,
@@ -339,8 +504,14 @@ def memory_read_write_coordinator(
             "available": [
                 "retrieve_similar_episode",
                 "retrieve_playbook",
+                "recall_semantic_rules",
+                "store_semantic_rule",
                 "store_episode",
                 "store_procedural_playbook",
+                "reinforce_playbook",
+                "list_episodes",
+                "session_open",
+                "session_close",
                 "handoff_agent_state",
             ],
         }
@@ -397,6 +568,7 @@ def triage_live_incident(
     window_hours: int = 2,
     max_hops: int = 4,
     tenant_graph: str = "",
+    memory_graph: str = "",
 ) -> str:
     """Root-cause a firing alert and recall a matching procedural playbook.
 
@@ -405,6 +577,7 @@ def triage_live_incident(
         window_hours: Only consider PRs opened within this many hours.
         max_hops: Upstream traversal depth.
         tenant_graph: Graph tenant name.
+        memory_graph: Memory tenant name. Defaults to the configured one.
 
     Returns:
         JSON with ranked suspect causes, the structural signature, a blast
@@ -415,7 +588,7 @@ def triage_live_incident(
     result = triage_incident(
         _store(), graph, alert_id, window_hours=window_hours, max_hops=max_hops
     )
-    memory = _memory()
+    memory = _memory(memory_graph, graph)
     episodes = memory.retrieve_similar_episodes(result.signature, top_k=3)
     playbook = memory.retrieve_playbook(result.signature)
     return _json(
@@ -444,6 +617,9 @@ def execute_verified_remediation(
     graph: str = "",
     expert_handle: str = "",
     team: str = "",
+    stale_doc_ids: list[str] | None = None,
+    patch_summary: str = "",
+    dry_run: bool | None = None,
 ) -> str:
     """Execute a remediation, but only with a certificate that proves it is safe.
 
@@ -463,6 +639,9 @@ def execute_verified_remediation(
         graph: Graph the proof came from.
         expert_handle: Target handle for page_domain_expert.
         team: Target team for page_domain_expert.
+        stale_doc_ids: Documents to re-sync for sync_stale_adr_doc.
+        patch_summary: Summary of the change for apply_hotfix_patch.
+        dry_run: Override the configured dry-run setting for this call.
 
     Returns:
         JSON action record, or an error explaining the refusal.
@@ -478,7 +657,7 @@ def execute_verified_remediation(
         certificate_id=certificate_id or f"PROOF-{target_id}",
     )
 
-    executor = _executor()
+    executor = _executor(dry_run)
     kwargs: dict[str, Any] = {
         "target_id": target_id,
         "proof": proof,
@@ -491,10 +670,12 @@ def execute_verified_remediation(
         elif action_type == "block_ci_merge":
             result = executor.block_ci_merge(**kwargs)
         elif action_type == "apply_hotfix_patch":
-            result = executor.apply_hotfix_patch(**kwargs)
+            result = executor.apply_hotfix_patch(
+                **kwargs, patch_summary=patch_summary
+            )
         elif action_type == "sync_stale_adr_doc":
             result = executor.sync_stale_adr_doc(
-                **kwargs, stale_doc_ids=proof_path_ids
+                **kwargs, stale_doc_ids=stale_doc_ids or proof_path_ids
             )
         elif action_type == "page_domain_expert":
             result = executor.page_domain_expert(

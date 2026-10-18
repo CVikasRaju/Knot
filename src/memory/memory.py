@@ -333,18 +333,25 @@ class MemoryStore:
         statement: str,
         domain: str = "architecture",
         enforcement_level: str = "MUST",
+        source: str = "",
+        extra: dict | None = None,
     ) -> dict:
         payload = {
             "id": rule_id,
             "invariant_statement": statement,
             "domain": domain,
             "enforcement_level": enforcement_level,
+            "source": source,
         }
+        payload.update(extra or {})
         self.store.merge_nodes(self.graph, "SemanticRule", [payload])
         return payload
 
     def rules_for_domain(self, domain: str) -> list[dict]:
         return self.store.find_nodes(self.graph, "SemanticRule", {"domain": domain})
+
+    def all_rules(self) -> list[dict]:
+        return self.store.find_nodes(self.graph, "SemanticRule", limit=500)
 
     # ---- agent coordination ------------------------------------------------
     def open_session(self, session_id: str, active_agent: str) -> dict:

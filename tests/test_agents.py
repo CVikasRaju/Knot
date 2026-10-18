@@ -14,6 +14,7 @@ import pytest
 
 from src.actions.diff_parser import build_mutation_spec
 from src.agents import SwarmOrchestrator
+from src.memory.memory import MemoryStore
 from src.seed_data import PR_812_DIFF
 
 
@@ -109,6 +110,40 @@ def test_live_incident_recalls_episodic_memory(seeded, shadow_graphs_clean):
     assert result["episodes"], "the seeded memory holds matching incidents"
     assert result["playbook_match"] is not None
     assert result["episodes"][0]["similarity"] > 0
+
+
+def test_live_incident_recalls_semantic_memory(seeded, shadow_graphs_clean):
+    """The third memory tier must actually participate, not just be declared.
+
+    ``SemanticRule`` is seeded and read back by domain during triage. This
+    asserts the rules reach the scenario result the API and UI render, so
+    "tri-tier memory" is a behaviour rather than a label in the README.
+    """
+    store, settings = seeded
+    result = _orchestrator(store, settings).run_live_incident("ALT-904", "SESS-L1s")
+
+    rules = result["semantic_rules"]
+    assert rules, "no semantic rules were recalled for the payment incident"
+    assert result["semantic_domain"] == "payments"
+    assert all(r["invariant_statement"] for r in rules)
+    # Triage must have cited them as inspected evidence, not merely fetched them.
+    triage = next(s for s in result["steps"] if s["agent"] == "triage")
+    rule_ids = {r["id"] for r in rules}
+    assert rule_ids <= set(triage["inspected_node_ids"])
+
+
+def test_seeded_semantic_rules_persist_in_the_memory_graph(seeded):
+    """The seeder must write every declared rule into ``agent_memory``."""
+    store, settings = seeded
+    stored = store.find_nodes(settings.memory_graph, "SemanticRule", limit=500)
+    stored_ids = {node["id"] for node in stored}
+    assert len(stored_ids) == 7, f"expected 7 seeded rules, found {stored_ids}"
+
+    memory = MemoryStore(store, settings.memory_graph)
+    payments = memory.rules_for_domain("payments")
+    assert payments, "the payments domain must have invariants"
+    assert all(r["domain"] == "payments" for r in payments)
+    assert {r["id"] for r in payments} <= stored_ids
 
 
 def test_live_incident_triage_produces_a_proven_certificate(

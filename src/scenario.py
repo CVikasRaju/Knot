@@ -233,6 +233,16 @@ def run_live_incident(args: argparse.Namespace,
     if result.get("new_episode_id"):
         print(f"  wrote new episode {_c(result['new_episode_id'], MAGENTA)}")
 
+    _rule("SEMANTIC MEMORY (standing invariants)")
+    rules = result.get("semantic_rules") or []
+    domain = result.get("semantic_domain") or "this"
+    if rules:
+        print(f"  {len(rules)} rule(s) hold over the {domain} domain:")
+        for rule in rules:
+            print(f"      {rule['invariant_statement']}")
+    else:
+        print(f"  no standing invariant found for the {domain} domain")
+
     _rule("ACTIONS")
     for action in result.get("actions", []):
         print(f"  {action['action_type']:<22} {action['status']:<8} "
