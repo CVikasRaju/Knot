@@ -585,6 +585,7 @@ frontend/                3D command center (Vite + React + TypeScript)
 tests/                   contract + scenario suites (real FalkorDB)
 scripts/                 thin CLI shims
 CONTRIBUTING.md          design decisions, testing notes and known traps
+DEMO.md                  three-minute walkthrough script and recording notes
 ```
 
 ---
